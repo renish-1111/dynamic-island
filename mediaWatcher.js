@@ -93,7 +93,7 @@ export const MediaWatcher = GObject.registerClass({
         this.emit('changed');
     }
 
-    // Returns null, or { title, artist, playing, playPause() }
+    // Returns null, or { title, artist, artUrl, playing, playPause() }
     getActivePlayerInfo() {
         if (!this._activeName)
             return null;
@@ -115,10 +115,12 @@ export const MediaWatcher = GObject.registerClass({
         const title = unpack(metadata['xesam:title']) || '';
         const artistRaw = unpack(metadata['xesam:artist']);
         const artist = Array.isArray(artistRaw) ? artistRaw.join(', ') : '';
+        const artUrl = unpack(metadata['mpris:artUrl']) || '';
 
         return {
             title,
             artist,
+            artUrl,
             playing: proxy.PlaybackStatus === 'Playing',
             playPause: () => {
                 try {
