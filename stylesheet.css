@@ -13,7 +13,12 @@
 .dynamic-island-icon {
     color: #ffffff;
     border-radius: 10px;
+    padding: 0;
     margin-right: 12px;
+}
+
+.dynamic-island-icon-art {
+    border-radius: 18px;
 }
 
 .dynamic-island-title {
@@ -21,7 +26,7 @@
     font-weight: 800;
     font-size: 12px;
     font-family: 'Inter', '-apple-system', 'Segoe UI', 'Roboto', sans-serif;
-    text-align: center;
+    text-align: left;
 }
 
 .dynamic-island-body {
@@ -29,7 +34,7 @@
     font-weight: 500;
     font-size: 11px;
     font-family: 'Inter', '-apple-system', 'Segoe UI', 'Roboto', sans-serif;
-    text-align: center;
+    text-align: left;
 }
 
 .dynamic-island-queue-title {

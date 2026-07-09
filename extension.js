@@ -15,7 +15,7 @@ const COLLAPSED_WIDTH = 220;
 const COLLAPSED_HEIGHT = 40;
 const EXPANDED_WIDTH = 420;
 const EXPANDED_HEIGHT = 84;
-const ANIM_MS = 320;
+const ANIM_MS = 220;
 const DISPLAY_MS = 4000;
 const MAX_BODY_CHARS = 80;
 const MAX_QUEUE_HEIGHT = 450;
@@ -56,6 +56,7 @@ class DynamicIsland extends St.BoxLayout {
             style_class: 'dynamic-island-icon',
             icon_size: MEDIA_ICON_COLLAPSED_SIZE,
             y_align: Clutter.ActorAlign.CENTER,
+            clip_to_allocation: true,
             visible: false,
         });
 
@@ -63,12 +64,12 @@ class DynamicIsland extends St.BoxLayout {
             style_class: 'dynamic-island-text-box',
             vertical: true,
             y_align: Clutter.ActorAlign.CENTER,
-            x_align: Clutter.ActorAlign.CENTER,
+            x_align: Clutter.ActorAlign.START,
             x_expand: true,
         });
 
-        this._titleLabel = new St.Label({ style_class: 'dynamic-island-title', x_align: Clutter.ActorAlign.CENTER });
-        this._bodyLabel = new St.Label({ style_class: 'dynamic-island-body', x_align: Clutter.ActorAlign.CENTER });
+        this._titleLabel = new St.Label({ style_class: 'dynamic-island-title', x_align: Clutter.ActorAlign.START });
+        this._bodyLabel = new St.Label({ style_class: 'dynamic-island-body', x_align: Clutter.ActorAlign.START });
         this._titleLabel.clutter_text.set_ellipsize(3); // PANGO_ELLIPSIZE_END
         this._bodyLabel.clutter_text.set_ellipsize(3);
 
@@ -181,6 +182,7 @@ class DynamicIsland extends St.BoxLayout {
 
         this._collapseTimeoutId = null;
         this._notificationShowing = false;
+        this._lastNotificationIcon = null;
         this._mediaMode = false;
         this._isPinned = false;
         this._isHovered = false;
@@ -191,6 +193,27 @@ class DynamicIsland extends St.BoxLayout {
         this.connect('enter-event', () => this._onEnter());
         this.connect('leave-event', () => this._onLeave());
         this.connect('button-release-event', () => this._onClick());
+    }
+
+    _easeIsland(params) {
+        this.remove_all_transitions();
+        this.ease(params);
+    }
+
+    _easeIconSize(iconSize) {
+        this._icon.remove_all_transitions();
+        this._icon.ease({
+            icon_size: iconSize,
+            duration: ANIM_MS,
+            mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
+        });
+    }
+
+    _setIconArtMode(isArt) {
+        if (isArt)
+            this._icon.add_style_class_name('dynamic-island-icon-art');
+        else
+            this._icon.remove_style_class_name('dynamic-island-icon-art');
     }
 
     _updateClock() {
@@ -284,12 +307,12 @@ class DynamicIsland extends St.BoxLayout {
             const monitor = Main.layoutManager.primaryMonitor;
             const targetX = monitor ? monitor.x + monitor.width / 2 - 400 / 2 : this.x;
 
-            this.ease({
+            this._easeIsland({
                 width: 400,
                 height: targetHeight,
                 x: targetX,
                 duration: ANIM_MS,
-                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
             });
             return GLib.SOURCE_REMOVE;
         });
@@ -370,21 +393,28 @@ class DynamicIsland extends St.BoxLayout {
 
         this._clockLabel.hide();
         
-        if (this._mediaMode && this._lastMediaInfo && this._lastMediaInfo.artUrl) {
-            this._icon.ease({ icon_size: MEDIA_ICON_EXPANDED_SIZE, duration: ANIM_MS, mode: Clutter.AnimationMode.EASE_OUT_QUAD });
+        let useLargeIcon = false;
+        if (this._notificationShowing && this._lastNotificationIcon) {
+            useLargeIcon = true;
+        } else if (this._mediaMode && this._lastMediaInfo && this._lastMediaInfo.artUrl) {
+            useLargeIcon = true;
+        }
+
+        if (useLargeIcon) {
+            this._easeIconSize(MEDIA_ICON_EXPANDED_SIZE);
         } else {
-            this._icon.ease({ icon_size: MEDIA_ICON_COLLAPSED_SIZE, duration: ANIM_MS, mode: Clutter.AnimationMode.EASE_OUT_QUAD });
+            this._easeIconSize(MEDIA_ICON_COLLAPSED_SIZE);
         }
 
         const monitor = Main.layoutManager.primaryMonitor;
         const targetX = monitor ? monitor.x + monitor.width / 2 - EXPANDED_WIDTH / 2 : this.x;
 
-        this.ease({
+        this._easeIsland({
             width: EXPANDED_WIDTH,
             height: EXPANDED_HEIGHT,
             x: targetX,
             duration: ANIM_MS,
-            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
         });
     }
 
@@ -398,12 +428,15 @@ class DynamicIsland extends St.BoxLayout {
         }
         
         this._notificationShowing = true;
+        this._lastNotificationIcon = gicon;
         this._clockLabel.hide();
 
         if (gicon) {
+            this._setIconArtMode(true);
             this._icon.set_gicon(gicon);
             this._icon.show();
         } else {
+            this._setIconArtMode(false);
             this._icon.hide();
         }
 
@@ -468,18 +501,21 @@ class DynamicIsland extends St.BoxLayout {
         if (info.artUrl) {
             try {
                 const file = Gio.File.new_for_uri(info.artUrl);
+                this._setIconArtMode(true);
                 this._icon.set_gicon(new Gio.FileIcon({ file }));
             } catch (e) {
+                this._setIconArtMode(false);
                 this._icon.set_icon_name('audio-x-generic-symbolic');
             }
         } else {
+            this._setIconArtMode(false);
             this._icon.set_icon_name('audio-x-generic-symbolic');
         }
         this._icon.show();
         if (info.artUrl) {
-            this._icon.ease({ icon_size: MEDIA_ICON_EXPANDED_SIZE, duration: ANIM_MS, mode: Clutter.AnimationMode.EASE_OUT_QUAD });
+            this._easeIconSize(MEDIA_ICON_EXPANDED_SIZE);
         } else {
-            this._icon.ease({ icon_size: MEDIA_ICON_COLLAPSED_SIZE, duration: ANIM_MS, mode: Clutter.AnimationMode.EASE_OUT_QUAD });
+            this._easeIconSize(MEDIA_ICON_COLLAPSED_SIZE);
         }
 
         this._titleLabel.set_text(info.title || 'Playing');
@@ -504,17 +540,17 @@ class DynamicIsland extends St.BoxLayout {
     _collapse() {
         if (this._queueShowing) return;
 
-        this._icon.ease({ icon_size: 24, duration: ANIM_MS, mode: Clutter.AnimationMode.EASE_OUT_QUAD });
+        this._easeIconSize(MEDIA_ICON_COLLAPSED_SIZE);
 
         const monitor = Main.layoutManager.primaryMonitor;
         const targetX = monitor ? monitor.x + monitor.width / 2 - COLLAPSED_WIDTH / 2 : this.x;
 
-        this.ease({
+        this._easeIsland({
             width: COLLAPSED_WIDTH,
             height: COLLAPSED_HEIGHT,
             x: targetX,
             duration: ANIM_MS,
-            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
             onComplete: () => {
                 if (!this._notificationShowing && !this._mediaMode && !this._queueShowing) {
                     this._textBox.hide();
