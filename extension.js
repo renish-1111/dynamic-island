@@ -281,9 +281,13 @@ class DynamicIsland extends St.BoxLayout {
             targetHeight += COLLAPSED_HEIGHT;
             targetHeight = Math.min(targetHeight, MAX_QUEUE_HEIGHT);
 
+            const monitor = Main.layoutManager.primaryMonitor;
+            const targetX = monitor ? monitor.x + monitor.width / 2 - 400 / 2 : this.x;
+
             this.ease({
                 width: 400,
                 height: targetHeight,
+                x: targetX,
                 duration: ANIM_MS,
                 mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             });
@@ -372,9 +376,13 @@ class DynamicIsland extends St.BoxLayout {
             this._icon.ease({ icon_size: MEDIA_ICON_COLLAPSED_SIZE, duration: ANIM_MS, mode: Clutter.AnimationMode.EASE_OUT_QUAD });
         }
 
+        const monitor = Main.layoutManager.primaryMonitor;
+        const targetX = monitor ? monitor.x + monitor.width / 2 - EXPANDED_WIDTH / 2 : this.x;
+
         this.ease({
             width: EXPANDED_WIDTH,
             height: EXPANDED_HEIGHT,
+            x: targetX,
             duration: ANIM_MS,
             mode: Clutter.AnimationMode.EASE_OUT_QUAD,
         });
@@ -498,9 +506,13 @@ class DynamicIsland extends St.BoxLayout {
 
         this._icon.ease({ icon_size: 24, duration: ANIM_MS, mode: Clutter.AnimationMode.EASE_OUT_QUAD });
 
+        const monitor = Main.layoutManager.primaryMonitor;
+        const targetX = monitor ? monitor.x + monitor.width / 2 - COLLAPSED_WIDTH / 2 : this.x;
+
         this.ease({
             width: COLLAPSED_WIDTH,
             height: COLLAPSED_HEIGHT,
+            x: targetX,
             duration: ANIM_MS,
             mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             onComplete: () => {
@@ -531,7 +543,6 @@ export default class DynamicIslandExtension extends Extension {
             trackFullscreen: false,
         });
 
-        this._island.connect('notify::width', () => this._reposition());
         this._reposition();
 
         this._monitorsChangedId = Main.layoutManager.connect(
@@ -584,7 +595,7 @@ export default class DynamicIslandExtension extends Extension {
         if (!monitor || !this._island)
             return;
         this._island.set_position(
-            monitor.x + Math.floor(monitor.width / 2 - this._island.width / 2),
+            monitor.x + monitor.width / 2 - this._island.width / 2,
             monitor.y
         );
     }

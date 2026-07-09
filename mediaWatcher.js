@@ -129,6 +129,20 @@ export const MediaWatcher = GObject.registerClass({
                     logError(e, 'DynamicIsland: PlayPause failed');
                 }
             },
+            next: () => {
+                try {
+                    proxy.NextRemote(() => {});
+                } catch (e) {
+                    logError(e, 'DynamicIsland: Next failed');
+                }
+            },
+            previous: () => {
+                try {
+                    proxy.PreviousRemote(() => {});
+                } catch (e) {
+                    logError(e, 'DynamicIsland: Previous failed');
+                }
+            },
         };
     }
 
