@@ -1,0 +1,37 @@
+.dynamic-island {
+    background-color: rgba(0, 0, 0, 0.95);
+    border-radius: 20px;
+    padding: 4px 14px;
+    spacing: 10px;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
+}
+
+.dynamic-island-icon {
+    color: #ffffff;
+    icon-size: 20px;
+}
+
+.dynamic-island-title {
+    color: #ffffff;
+    font-weight: 600;
+    font-size: 13px;
+}
+
+.dynamic-island-body {
+    color: #d0d0d0;
+    font-size: 12px;
+}
+
+.dynamic-island-text-box {
+    spacing: 1px;
+}
+
+.dynamic-island-media-button {
+    background-color: rgba(255, 255, 255, 0.15);
+    border-radius: 14px;
+    padding: 5px;
+}
+
+.dynamic-island-media-button:hover {
+    background-color: rgba(255, 255, 255, 0.28);
+}
