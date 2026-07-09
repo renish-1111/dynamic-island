@@ -21,6 +21,7 @@ const MAX_BODY_CHARS = 80;
 const MAX_QUEUE_HEIGHT = 450;
 const MEDIA_ICON_COLLAPSED_SIZE = 28;
 const MEDIA_ICON_EXPANDED_SIZE = 48;
+const MEDIA_CONTROL_ICON_SIZE = 16;
 
 const DynamicIsland = GObject.registerClass(
 class DynamicIsland extends St.BoxLayout {
@@ -81,7 +82,7 @@ class DynamicIsland extends St.BoxLayout {
         });
         this._mediaButtonIcon = new St.Icon({
             icon_name: 'media-playback-start-symbolic',
-            icon_size: 12,
+            icon_size: MEDIA_CONTROL_ICON_SIZE,
         });
         this._mediaButton.set_child(this._mediaButtonIcon);
         this._mediaButton.connect('clicked', () => {
@@ -96,7 +97,7 @@ class DynamicIsland extends St.BoxLayout {
         });
         this._prevButtonIcon = new St.Icon({
             icon_name: 'media-skip-backward-symbolic',
-            icon_size: 12,
+            icon_size: MEDIA_CONTROL_ICON_SIZE,
         });
         this._prevButton.set_child(this._prevButtonIcon);
         this._prevButton.connect('clicked', () => {
@@ -111,7 +112,7 @@ class DynamicIsland extends St.BoxLayout {
         });
         this._nextButtonIcon = new St.Icon({
             icon_name: 'media-skip-forward-symbolic',
-            icon_size: 12,
+            icon_size: MEDIA_CONTROL_ICON_SIZE,
         });
         this._nextButton.set_child(this._nextButtonIcon);
         this._nextButton.connect('clicked', () => {
@@ -284,7 +285,7 @@ class DynamicIsland extends St.BoxLayout {
                 width: 400,
                 height: targetHeight,
                 duration: ANIM_MS,
-                mode: Clutter.AnimationMode.EASE_OUT_BACK,
+                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             });
             return GLib.SOURCE_REMOVE;
         });
@@ -375,7 +376,7 @@ class DynamicIsland extends St.BoxLayout {
             width: EXPANDED_WIDTH,
             height: EXPANDED_HEIGHT,
             duration: ANIM_MS,
-            mode: Clutter.AnimationMode.EASE_OUT_BACK,
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
         });
     }
 
@@ -584,7 +585,7 @@ export default class DynamicIslandExtension extends Extension {
             return;
         this._island.set_position(
             monitor.x + Math.floor(monitor.width / 2 - this._island.width / 2),
-            monitor.y + 1
+            monitor.y
         );
     }
 
