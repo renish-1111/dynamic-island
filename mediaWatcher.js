@@ -1,6 +1,7 @@
 'use strict';
 
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 
 const MPRIS_PREFIX = 'org.mpris.MediaPlayer2.';
@@ -10,9 +11,14 @@ const PlayerIface = `
   <interface name="org.mpris.MediaPlayer2.Player">
     <property name="PlaybackStatus" type="s" access="read"/>
     <property name="Metadata" type="a{sv}" access="read"/>
+    <property name="CanSeek" type="b" access="read"/>
     <method name="PlayPause"/>
     <method name="Next"/>
     <method name="Previous"/>
+    <method name="SetPosition">
+      <arg type="o" direction="in"/>
+      <arg type="x" direction="in"/>
+    </method>
   </interface>
 </node>`;
 
@@ -116,11 +122,15 @@ export const MediaWatcher = GObject.registerClass({
         const artistRaw = unpack(metadata['xesam:artist']);
         const artist = Array.isArray(artistRaw) ? artistRaw.join(', ') : '';
         const artUrl = unpack(metadata['mpris:artUrl']) || '';
+        const length = unpack(metadata['mpris:length']) || 0;
+        const trackId = unpack(metadata['mpris:trackid']) || null;
 
         return {
             title,
             artist,
             artUrl,
+            length,
+            canSeek: !!proxy.CanSeek && !!trackId && length > 0,
             playing: proxy.PlaybackStatus === 'Playing',
             playPause: () => {
                 try {
@@ -143,7 +153,52 @@ export const MediaWatcher = GObject.registerClass({
                     logError(e, 'DynamicIsland: Previous failed');
                 }
             },
+            seekTo: fraction => {
+                if (!trackId || length <= 0)
+                    return;
+                try {
+                    const position = Math.round(Math.min(Math.max(fraction, 0), 1) * length);
+                    proxy.SetPositionRemote(trackId, position, () => {});
+                } catch (e) {
+                    logError(e, 'DynamicIsland: SetPosition failed');
+                }
+            },
+            // Asks the player to bring its own window to the front — the MPRIS
+            // "open where it's playing" hook. Not every player implements it
+            // (CanRaise may be false), so failures are just swallowed.
+            raise: () => {
+                Gio.DBus.session.call(
+                    this._activeName, '/org/mpris/MediaPlayer2',
+                    'org.mpris.MediaPlayer2', 'Raise', null, null,
+                    Gio.DBusCallFlags.NONE, -1, null,
+                    (conn, res) => {
+                        try {
+                            conn.call_finish(res);
+                        } catch (e) { /* player doesn't support raising */ }
+                    });
+            },
         };
+    }
+
+    // Async — resolves with current playback position in microseconds, or null.
+    queryPosition(callback) {
+        if (!this._activeName) {
+            callback(null);
+            return;
+        }
+        Gio.DBus.session.call(
+            this._activeName, '/org/mpris/MediaPlayer2',
+            'org.freedesktop.DBus.Properties', 'Get',
+            new GLib.Variant('(ss)', ['org.mpris.MediaPlayer2.Player', 'Position']),
+            new GLib.VariantType('(v)'), Gio.DBusCallFlags.NONE, -1, null,
+            (conn, res) => {
+                try {
+                    const [variant] = conn.call_finish(res).deep_unpack();
+                    callback(variant.deep_unpack());
+                } catch (e) {
+                    callback(null);
+                }
+            });
     }
 
     destroy() {

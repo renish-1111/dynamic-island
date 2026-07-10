@@ -3,5 +3,6 @@
     "name": "Dynamic Island Notifications",
     "description": "Turns incoming notifications into an iPhone-style Dynamic Island pill at the top of the screen.",
     "shell-version": ["45", "46", "47", "48", "49", "50"],
+    "settings-schema": "org.gnome.shell.extensions.dynamic-island",
     "version": 1
 }

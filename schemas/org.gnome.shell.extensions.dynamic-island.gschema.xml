@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.dynamic-island" path="/org/gnome/shell/extensions/dynamic-island/">
+
+    <key name="display-duration-ms" type="i">
+      <default>4000</default>
+      <range min="1000" max="10000"/>
+      <summary>Notification display duration</summary>
+      <description>How long a notification stays expanded before collapsing, in milliseconds.</description>
+    </key>
+
+    <key name="animation-duration-ms" type="i">
+      <default>220</default>
+      <range min="100" max="500"/>
+      <summary>Animation duration</summary>
+      <description>Duration of expand/collapse animations, in milliseconds.</description>
+    </key>
+
+    <key name="top-offset" type="i">
+      <default>0</default>
+      <range min="0" max="40"/>
+      <summary>Top offset</summary>
+      <description>Vertical gap between the screen edge and the island, in pixels.</description>
+    </key>
+
+    <key name="accent-color" type="s">
+      <default>'#0a84ff'</default>
+      <summary>Accent color</summary>
+      <description>Accent color used for the progress bar and highlights, as a hex string.</description>
+    </key>
+
+    <key name="notifications-enabled" type="b">
+      <default>true</default>
+      <summary>Enable notification takeover</summary>
+      <description>Show incoming notifications as an island pill instead of standard banners.</description>
+    </key>
+
+    <key name="media-enabled" type="b">
+      <default>true</default>
+      <summary>Enable media integration</summary>
+      <description>Show a persistent pill with playback controls while media is playing (MPRIS).</description>
+    </key>
+
+    <key name="show-seek-bar" type="b">
+      <default>true</default>
+      <summary>Show seek bar</summary>
+      <description>Show a clickable progress/seek bar under media info when expanded.</description>
+    </key>
+
+    <key name="enable-badge" type="b">
+      <default>true</default>
+      <summary>Enable unread badge</summary>
+      <description>Show a small unread-count indicator next to the clock when notifications are queued.</description>
+    </key>
+
+    <key name="enable-pulse" type="b">
+      <default>true</default>
+      <summary>Enable playing pulse</summary>
+      <description>Subtly pulse the album art / icon while media is playing.</description>
+    </key>
+
+    <key name="muted-apps" type="as">
+      <default>[]</default>
+      <summary>Muted applications</summary>
+      <description>Application names whose notifications are queued silently without triggering the island pill.</description>
+    </key>
+
+  </schema>
+</schemalist>
