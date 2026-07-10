@@ -65,3 +65,6 @@ All user-configurable state is a single GSettings schema, `org.gnome.shell.exten
 ### Styling
 
 `stylesheet.css` uses GNOME Shell's St CSS dialect (a CSS subset), scoped under a `.dynamic-island` class hierarchy. Layout dimensions (widths/heights per state) are defined as JS constants at the top of `extension.js`, not in CSS — CSS handles color/spacing/radius, JS handles size transitions.
+
+for online guidance
+https://gjs.guide/extensions/

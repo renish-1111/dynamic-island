@@ -12,6 +12,8 @@ const PlayerIface = `
     <property name="PlaybackStatus" type="s" access="read"/>
     <property name="Metadata" type="a{sv}" access="read"/>
     <property name="CanSeek" type="b" access="read"/>
+    <property name="CanGoNext" type="b" access="read"/>
+    <property name="CanGoPrevious" type="b" access="read"/>
     <method name="PlayPause"/>
     <method name="Next"/>
     <method name="Previous"/>
@@ -131,24 +133,35 @@ export const MediaWatcher = GObject.registerClass({
             artUrl,
             length,
             canSeek: !!proxy.CanSeek && !!trackId && length > 0,
+            canGoNext: proxy.CanGoNext !== false, // default to true if undefined
+            canGoPrevious: proxy.CanGoPrevious !== false,
             playing: proxy.PlaybackStatus === 'Playing',
             playPause: () => {
                 try {
-                    proxy.PlayPauseRemote(() => {});
+                    Gio.DBus.session.call(
+                        this._activeName, '/org/mpris/MediaPlayer2',
+                        'org.mpris.MediaPlayer2.Player', 'PlayPause',
+                        null, null, Gio.DBusCallFlags.NONE, -1, null, () => {});
                 } catch (e) {
                     logError(e, 'DynamicIsland: PlayPause failed');
                 }
             },
             next: () => {
                 try {
-                    proxy.NextRemote(() => {});
+                    Gio.DBus.session.call(
+                        this._activeName, '/org/mpris/MediaPlayer2',
+                        'org.mpris.MediaPlayer2.Player', 'Next',
+                        null, null, Gio.DBusCallFlags.NONE, -1, null, () => {});
                 } catch (e) {
                     logError(e, 'DynamicIsland: Next failed');
                 }
             },
             previous: () => {
                 try {
-                    proxy.PreviousRemote(() => {});
+                    Gio.DBus.session.call(
+                        this._activeName, '/org/mpris/MediaPlayer2',
+                        'org.mpris.MediaPlayer2.Player', 'Previous',
+                        null, null, Gio.DBusCallFlags.NONE, -1, null, () => {});
                 } catch (e) {
                     logError(e, 'DynamicIsland: Previous failed');
                 }

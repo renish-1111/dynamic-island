@@ -12,27 +12,27 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import { MediaWatcher } from './mediaWatcher.js';
 
-const COLLAPSED_HEIGHT = 40;
-const MIN_COLLAPSED_WIDTH = 160;
-const MAX_COLLAPSED_WIDTH = 220;
-const MIN_COLLAPSED_MEDIA_WIDTH = 200;
-const MAX_COLLAPSED_MEDIA_WIDTH = 320;
-const MIN_EXPANDED_WIDTH = 340;
-const MAX_EXPANDED_WIDTH = 460;
-const MIN_EXPANDED_WIDTH_MEDIA = 300;
-const MAX_EXPANDED_WIDTH_MEDIA = 380;
-const MIN_EXPANDED_WIDTH_WITH_SEEK = 380;
-const MAX_EXPANDED_WIDTH_WITH_SEEK = 480;
-const EXPANDED_HEIGHT = 84;
-const EXPANDED_HEIGHT_WITH_SEEK = 124;
-const CONTENT_WIDTH_PADDING = 56;
+const COLLAPSED_HEIGHT = 34;
+const MIN_COLLAPSED_WIDTH = 140;
+const MAX_COLLAPSED_WIDTH = 200;
+const MIN_COLLAPSED_MEDIA_WIDTH = 180;
+const MAX_COLLAPSED_MEDIA_WIDTH = 300;
+const MIN_EXPANDED_WIDTH = 300;
+const MAX_EXPANDED_WIDTH = 420;
+const MIN_EXPANDED_WIDTH_MEDIA = 280;
+const MAX_EXPANDED_WIDTH_MEDIA = 340;
+const MIN_EXPANDED_WIDTH_WITH_SEEK = 340;
+const MAX_EXPANDED_WIDTH_WITH_SEEK = 420;
+const EXPANDED_HEIGHT = 68;
+const EXPANDED_HEIGHT_WITH_SEEK = 100;
+const CONTENT_WIDTH_PADDING = 40;
 const MAX_BODY_CHARS = 80;
-const MAX_QUEUE_HEIGHT = 450;
-const MIN_QUEUE_WIDTH = 320;
-const MAX_QUEUE_WIDTH = 460;
-const MEDIA_ICON_COLLAPSED_SIZE = 28;
-const MEDIA_ICON_EXPANDED_SIZE = 48;
-const MEDIA_CONTROL_ICON_SIZE = 16;
+const MAX_QUEUE_HEIGHT = 400;
+const MIN_QUEUE_WIDTH = 300;
+const MAX_QUEUE_WIDTH = 420;
+const MEDIA_ICON_COLLAPSED_SIZE = 24;
+const MEDIA_ICON_EXPANDED_SIZE = 40;
+const MEDIA_CONTROL_ICON_SIZE = 14;
 const POSITION_POLL_MS = 1000;
 const PULSE_MS = 1400;
 const MULTI_CLICK_MS = 300;
@@ -571,7 +571,7 @@ class DynamicIsland extends St.BoxLayout {
     _onClick() {
         this._clickCount = (this._clickCount || 0) + 1;
         if (this._clickTimeoutId)
-            GLib.source_remove(this._clickTimeoutId);
+            return Clutter.EVENT_PROPAGATE;
 
         this._clickTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, MULTI_CLICK_MS, () => {
             this._clickTimeoutId = null;
@@ -696,6 +696,7 @@ class DynamicIsland extends St.BoxLayout {
         this._mediaButton.hide();
         this._prevButton.hide();
         this._nextButton.hide();
+        this._progressRow.hide();
         this._notifCloseButton.hide();
 
         this._queueContainer.show();
@@ -850,7 +851,7 @@ class DynamicIsland extends St.BoxLayout {
         itemBox.connect('button-release-event', () => {
             clickCount++;
             if (clickTimeoutId)
-                GLib.source_remove(clickTimeoutId);
+                return Clutter.EVENT_STOP;
 
             clickTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, MULTI_CLICK_MS, () => {
                 clickTimeoutId = null;
@@ -946,6 +947,7 @@ class DynamicIsland extends St.BoxLayout {
         if (this._queueShowing) return;
 
         this.remove_style_class_name('dynamic-island-compact');
+        this.remove_style_class_name('dynamic-island-compact-music');
         this.set_scale(1, 1);
         this._clockLabel.hide();
         this._badgeLabel.hide();
@@ -1170,9 +1172,17 @@ class DynamicIsland extends St.BoxLayout {
 
         if (this._isPinned || this._isHovered) {
             this._bodyLabel.visible = !!info.artist;
-            this._prevButton.show();
+            if (info.canGoPrevious)
+                this._prevButton.show();
+            else
+                this._prevButton.hide();
+            
             this._mediaButton.show();
-            this._nextButton.show();
+            
+            if (info.canGoNext)
+                this._nextButton.show();
+            else
+                this._nextButton.hide();
 
             if (this._settings.get_boolean('show-seek-bar') && info.length > 0) {
                 this._progressRow.show();
@@ -1337,6 +1347,12 @@ class DynamicIsland extends St.BoxLayout {
         // content; the true idle pill (clock only) hugs its own (much
         // narrower) content too, just within a tighter range.
         const isCollapsedMedia = this._mediaMode && !this._notificationShowing;
+        
+        if (isCollapsedMedia) {
+            this.add_style_class_name('dynamic-island-compact-music');
+        } else {
+            this.remove_style_class_name('dynamic-island-compact-music');
+        }
         const targetWidth = isCollapsedMedia
             ? this._computeContentWidth(MIN_COLLAPSED_MEDIA_WIDTH, MAX_COLLAPSED_MEDIA_WIDTH)
             : this._computeContentWidth(MIN_COLLAPSED_WIDTH, MAX_COLLAPSED_WIDTH);
