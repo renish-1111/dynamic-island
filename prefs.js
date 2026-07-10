@@ -35,7 +35,7 @@ export default class DynamicIslandPreferences extends ExtensionPreferences {
 
         group.add(this._spinRow(settings, 'top-offset',
             'Top offset', 'Gap between the screen edge and the island (px)',
-            0, 40, 1));
+            -20, 40, 1));
 
         return page;
     }

@@ -565,10 +565,9 @@ class DynamicIsland extends St.BoxLayout {
     // Clicks are counted over a debounce window so single/double/triple taps
     // on the same spot can be told apart without any of them firing early.
     // While a notification is showing: single click dismisses it, double
-    // (or more) opens/activates it. Otherwise: single click opens/closes the
+    // (or more) opens/activates it. Otherwise: double click opens/closes the
     // notification queue, triple click expands/collapses the pinned music
-    // view (double click is intentionally not bound to anything, so it
-    // can't be mistaken for either gesture).
+    // view (single click is intentionally not bound to anything).
     _onClick() {
         this._clickCount = (this._clickCount || 0) + 1;
         if (this._clickTimeoutId)
@@ -580,12 +579,11 @@ class DynamicIsland extends St.BoxLayout {
             this._clickCount = 0;
 
             if (this._notificationShowing) {
-                if (count >= 2)
+                if (count >= 2) {
                     this._activateNotification();
-                else
-                    this._dismissNotification();
-            } else if (count === 1) {
-                this._onSingleClick();
+                }
+            } else if (count === 2) {
+                this._onDoubleClick();
             } else if (count >= 3) {
                 this._onTripleClick();
             }
@@ -594,9 +592,9 @@ class DynamicIsland extends St.BoxLayout {
         return Clutter.EVENT_PROPAGATE;
     }
 
-    _onSingleClick() {
+    _onDoubleClick() {
         // While the pinned/held-expanded music view is showing, a plain
-        // click shouldn't also pop the notification queue open underneath it.
+        // double click shouldn't also pop the notification queue open underneath it.
         if (this._mediaMode && this._isPinned)
             return;
 
@@ -846,13 +844,27 @@ class DynamicIsland extends St.BoxLayout {
             reactive: true,
             x_expand: true,
         });
+        let clickCount = 0;
+        let clickTimeoutId = null;
+
         itemBox.connect('button-release-event', () => {
-            try {
-                notif.activate();
-            } catch (e) {
-                logError(e, 'DynamicIsland: notification activate failed');
-            }
-            this._hideQueue();
+            clickCount++;
+            if (clickTimeoutId)
+                GLib.source_remove(clickTimeoutId);
+
+            clickTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, MULTI_CLICK_MS, () => {
+                clickTimeoutId = null;
+                if (clickCount >= 2) {
+                    try {
+                        notif.activate();
+                    } catch (e) {
+                        logError(e, 'DynamicIsland: notification activate failed');
+                    }
+                    this._hideQueue();
+                }
+                clickCount = 0;
+                return GLib.SOURCE_REMOVE;
+            });
             return Clutter.EVENT_STOP;
         });
 

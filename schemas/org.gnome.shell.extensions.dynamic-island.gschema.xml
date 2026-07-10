@@ -18,7 +18,7 @@
 
     <key name="top-offset" type="i">
       <default>0</default>
-      <range min="0" max="40"/>
+      <range min="-20" max="40"/>
       <summary>Top offset</summary>
       <description>Vertical gap between the screen edge and the island, in pixels.</description>
     </key>
