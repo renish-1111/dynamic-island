@@ -522,10 +522,11 @@ class DynamicIsland extends St.BoxLayout {
         }
     }
 
-    // Press-and-hold is a second, independent way to expand/collapse the
-    // pinned music view (alongside triple-click). Started on button-press
-    // and cancelled on release; if it fires, the matching button-release
-    // must not also be treated as a click.
+    // Press-and-hold is the only way to expand/collapse the pinned music
+    // view, kept separate from click-counting so it never competes with
+    // the queue's double-click toggle. Started on button-press and
+    // cancelled on release; if it fires, the matching button-release must
+    // not also be treated as a click.
     _onPress() {
         this._longPressFired = false;
         if (this._pressTimeoutId)
@@ -562,12 +563,13 @@ class DynamicIsland extends St.BoxLayout {
         }
     }
 
-    // Clicks are counted over a debounce window so single/double/triple taps
-    // on the same spot can be told apart without any of them firing early.
-    // While a notification is showing: single click dismisses it, double
-    // (or more) opens/activates it. Otherwise: double click opens/closes the
-    // notification queue, triple click expands/collapses the pinned music
-    // view (single click is intentionally not bound to anything).
+    // Clicks are counted over a debounce window so a double click doesn't
+    // fire early on the first tap. While a notification is showing, 2+
+    // clicks opens/activates it. Otherwise, 2+ clicks opens/closes the
+    // notification queue — always, regardless of the media pinned state,
+    // so the queue stays reachable while music is held open. Pinning the
+    // media view is a separate gesture (press-and-hold, see _onHold) so it
+    // never competes with the queue toggle over how many clicks landed.
     _onClick() {
         this._clickCount = (this._clickCount || 0) + 1;
         if (this._clickTimeoutId)
@@ -582,10 +584,8 @@ class DynamicIsland extends St.BoxLayout {
                 if (count >= 2) {
                     this._activateNotification();
                 }
-            } else if (count === 2) {
+            } else if (count >= 2) {
                 this._onDoubleClick();
-            } else if (count >= 3) {
-                this._onTripleClick();
             }
             return GLib.SOURCE_REMOVE;
         });
@@ -593,22 +593,10 @@ class DynamicIsland extends St.BoxLayout {
     }
 
     _onDoubleClick() {
-        // While the pinned/held-expanded music view is showing, a plain
-        // double click shouldn't also pop the notification queue open underneath it.
-        if (this._mediaMode && this._isPinned)
-            return;
-
         if (this._queueShowing)
             this._hideQueue();
         else
             this._showQueue();
-    }
-
-    _onTripleClick() {
-        if (this._mediaMode && !this._queueShowing) {
-            this._isPinned = !this._isPinned;
-            this._renderMedia();
-        }
     }
 
     _clearTimeouts() {
