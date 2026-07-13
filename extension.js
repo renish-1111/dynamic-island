@@ -1003,6 +1003,24 @@ class DynamicIsland extends St.BoxLayout {
         this._stopPositionPolling();
         this._progressRow.hide();
 
+        // A press-and-hold or multi-click gesture already in flight targeted
+        // whatever was on screen when it started (the media pill). If a
+        // notification interrupts mid-gesture, its eventual button-release
+        // must not be reinterpreted against the notification that just took
+        // over the pill — e.g. a long-press meant to pin/unpin media firing
+        // _onHold() after this point would instead activate the notification.
+        // Drop the in-flight gesture instead of letting it misfire later.
+        if (this._pressTimeoutId) {
+            GLib.source_remove(this._pressTimeoutId);
+            this._pressTimeoutId = null;
+        }
+        this._longPressFired = false;
+        if (this._clickTimeoutId) {
+            GLib.source_remove(this._clickTimeoutId);
+            this._clickTimeoutId = null;
+        }
+        this._clickCount = 0;
+
         this._notificationShowing = true;
         this._lastNotificationIcon = gicon;
         this._lastNotification = notification || null;
