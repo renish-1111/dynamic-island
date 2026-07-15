@@ -23,6 +23,17 @@
       <description>Vertical gap between the screen edge and the island, in pixels.</description>
     </key>
 
+    <key name="clock-format" type="s">
+      <choices>
+        <choice value='system'/>
+        <choice value='24h'/>
+        <choice value='12h'/>
+      </choices>
+      <default>'system'</default>
+      <summary>Clock format</summary>
+      <description>How the idle clock is displayed: match the system clock setting, always 24-hour, or always 12-hour with AM/PM.</description>
+    </key>
+
     <key name="accent-color" type="s">
       <default>'#0a84ff'</default>
       <summary>Accent color</summary>
@@ -63,6 +74,24 @@
       <default>[]</default>
       <summary>Muted applications</summary>
       <description>Application names whose notifications are queued silently without triggering the island pill.</description>
+    </key>
+
+    <key name="battery-alerts-enabled" type="b">
+      <default>true</default>
+      <summary>Enable battery alerts</summary>
+      <description>Show a brief pill when the charger is plugged/unplugged or the battery gets low (requires UPower).</description>
+    </key>
+
+    <key name="bluetooth-alerts-enabled" type="b">
+      <default>true</default>
+      <summary>Enable Bluetooth alerts</summary>
+      <description>Show a brief pill when a Bluetooth device connects or disconnects (requires BlueZ).</description>
+    </key>
+
+    <key name="color-tint-enabled" type="b">
+      <default>true</default>
+      <summary>Enable album-art color tint</summary>
+      <description>Tint the seek bar and playing pulse with a color sampled from the current album art instead of the fixed accent color.</description>
     </key>
 
   </schema>

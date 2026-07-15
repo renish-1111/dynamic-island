@@ -11,18 +11,23 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import { MediaWatcher } from './mediaWatcher.js';
+import { BatteryWatcher } from './batteryWatcher.js';
+import { BluetoothWatcher } from './bluetoothWatcher.js';
+import { extractDominantColor } from './colorExtract.js';
 
 const COLLAPSED_HEIGHT = 34;
 const MIN_COLLAPSED_WIDTH = 140;
 const MAX_COLLAPSED_WIDTH = 200;
-const MIN_COLLAPSED_MEDIA_WIDTH = 180;
-const MAX_COLLAPSED_MEDIA_WIDTH = 300;
+const MIN_COLLAPSED_MEDIA_WIDTH = 150;
+const MAX_COLLAPSED_MEDIA_WIDTH = 240;
+const MIN_COLLAPSED_TIMER_WIDTH = 130;
+const MAX_COLLAPSED_TIMER_WIDTH = 170;
 const MIN_EXPANDED_WIDTH = 300;
 const MAX_EXPANDED_WIDTH = 420;
-const MIN_EXPANDED_WIDTH_MEDIA = 280;
-const MAX_EXPANDED_WIDTH_MEDIA = 340;
-const MIN_EXPANDED_WIDTH_WITH_SEEK = 340;
-const MAX_EXPANDED_WIDTH_WITH_SEEK = 420;
+const MIN_EXPANDED_WIDTH_MEDIA = 230;
+const MAX_EXPANDED_WIDTH_MEDIA = 290;
+const MIN_EXPANDED_WIDTH_WITH_SEEK = 280;
+const MAX_EXPANDED_WIDTH_WITH_SEEK = 340;
 const EXPANDED_HEIGHT = 68;
 const EXPANDED_HEIGHT_WITH_SEEK = 100;
 const CONTENT_WIDTH_PADDING = 40;
@@ -37,6 +42,8 @@ const POSITION_POLL_MS = 1000;
 const PULSE_MS = 1400;
 const MULTI_CLICK_MS = 300;
 const LONG_PRESS_MS = 500;
+const TRANSIENT_DISPLAY_MS = 2500;
+const TIMER_PRESETS_MIN = [1, 5, 10, 15, 30];
 
 function formatTime(micros) {
     const totalSeconds = Math.max(0, Math.floor(micros / 1000000));
@@ -109,6 +116,7 @@ class DynamicIsland extends St.BoxLayout {
         });
 
         this._settings = settings;
+        this._interfaceSettings = new Gio.Settings({ schema_id: 'org.gnome.desktop.interface' });
 
         this._topBox = new St.BoxLayout({
             vertical: false,
@@ -127,6 +135,12 @@ class DynamicIsland extends St.BoxLayout {
             this._updateClock();
             return GLib.SOURCE_CONTINUE;
         });
+        this._clockFormatChangedId = this._settings.connect(
+            'changed::clock-format', () => this._updateClock());
+        // Only matters while the 'system' choice is selected, but cheap to
+        // keep connected unconditionally rather than re-wiring on toggle.
+        this._systemClockFormatChangedId = this._interfaceSettings.connect(
+            'changed::clock-format', () => this._updateClock());
 
         this._badgeLabel = new St.Label({
             style_class: 'dynamic-island-badge',
@@ -145,7 +159,7 @@ class DynamicIsland extends St.BoxLayout {
         // Tapping the album art jumps straight to the player, like tapping
         // the artwork in iOS's Dynamic Island / Control Center does.
         this._icon.connect('button-press-event', () => {
-            if (this._mediaMode && !this._notificationShowing && this._onMediaRaise) {
+            if (this._mediaMode && !this._notificationShowing && !this._transientShowing && this._onMediaRaise) {
                 this._onMediaRaise();
                 return Clutter.EVENT_STOP;
             }
@@ -263,13 +277,43 @@ class DynamicIsland extends St.BoxLayout {
             icon_name: 'window-close-symbolic',
             icon_size: MEDIA_CONTROL_ICON_SIZE,
         }));
-        this._notifCloseButton.connect('clicked', () => this._dismissNotification());
+        this._notifCloseButton.connect('clicked', () => {
+            if (this._transientShowing) {
+                this._clearCollapseTimeout();
+                this._closeTransientPill();
+            } else {
+                this._dismissNotification();
+            }
+        });
         this._addPressFeedback(this._notifCloseButton);
+
+        // Accessory chip shown alongside the media pill when a timer is also
+        // running — the "two islands merged" look: Now Playing stays primary
+        // in the main icon/text slot, the timer rides as a compact badge.
+        this._timerBadge = new St.BoxLayout({
+            style_class: 'dynamic-island-timer-badge',
+            vertical: false,
+            visible: false,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._timerBadgeIcon = new St.Icon({
+            icon_name: 'alarm-symbolic',
+            style_class: 'dynamic-island-timer-badge-icon',
+            icon_size: 12,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._timerBadgeLabel = new St.Label({
+            style_class: 'dynamic-island-timer-badge-label',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._timerBadge.add_child(this._timerBadgeIcon);
+        this._timerBadge.add_child(this._timerBadgeLabel);
 
         this._topBox.add_child(this._clockLabel);
         this._topBox.add_child(this._badgeLabel);
         this._topBox.add_child(this._icon);
         this._topBox.add_child(this._textBox);
+        this._topBox.add_child(this._timerBadge);
         this._topBox.add_child(this._prevButton);
         this._topBox.add_child(this._mediaButton);
         this._topBox.add_child(this._nextButton);
@@ -352,6 +396,37 @@ class DynamicIsland extends St.BoxLayout {
 
         this.add_child(this._queueContainer);
 
+        // The right-click timer quick-menu. Deliberately NOT a child of `this`
+        // — the island has clip_to_allocation set, so anything positioned
+        // outside its own box (like a dropdown below it) would be invisible.
+        // It's its own chrome actor instead, shown/hidden/positioned manually.
+        this._timerMenu = new St.BoxLayout({
+            style_class: 'dynamic-island-timer-menu',
+            vertical: true,
+            visible: false,
+        });
+        Main.layoutManager.addChrome(this._timerMenu, { affectsStruts: false, trackFullscreen: false });
+
+        TIMER_PRESETS_MIN.forEach(minutes => {
+            const btn = new St.Button({
+                label: `${minutes} min`,
+                style_class: 'dynamic-island-timer-preset',
+            });
+            btn.connect('clicked', () => this._startTimer(minutes));
+            this._addPressFeedback(btn);
+            this._timerMenu.add_child(btn);
+        });
+
+        this._timerCancelButton = new St.Button({
+            label: 'Cancel Timer',
+            style_class: 'dynamic-island-timer-cancel',
+            visible: false,
+        });
+        this._timerCancelButton.connect('clicked', () => this._cancelTimer());
+        this._addPressFeedback(this._timerCancelButton);
+        this._timerMenu.add_child(this._timerCancelButton);
+        this._timerMenuClickId = null;
+
         this._textBox.hide();
         this.set_size(
             this._computeContentWidth(MIN_COLLAPSED_WIDTH, MAX_COLLAPSED_WIDTH),
@@ -362,9 +437,18 @@ class DynamicIsland extends St.BoxLayout {
         this._pulseTimeoutId = null;
         this._notificationShowing = false;
         this._lastNotificationIcon = null;
+        this._transientShowing = false;
+        this._transientDurationMs = 0;
+        this._timerActive = false;
+        this._timerEndUs = 0;
+        this._timerTotalSeconds = 0;
+        this._timerPollId = null;
+        this._lastArtUrlForTint = null;
+        this._cachedTint = null;
         this._mediaMode = false;
         this._isPinned = false;
         this._isHovered = false;
+        this._leaveDebounceId = null;
         this._queueShowing = false;
         this._clickTimeoutId = null;
         this._clickCount = 0;
@@ -387,8 +471,8 @@ class DynamicIsland extends St.BoxLayout {
             else
                 this._onLeave();
         });
-        this.connect('button-press-event', () => this._onPress());
-        this.connect('button-release-event', () => this._onRelease());
+        this.connect('button-press-event', (actor, event) => this._onPress(event));
+        this.connect('button-release-event', (actor, event) => this._onRelease(event));
 
         this._refreshBadge();
     }
@@ -403,6 +487,26 @@ class DynamicIsland extends St.BoxLayout {
 
     _accentColor() {
         return this._settings.get_string('accent-color') || '#0a84ff';
+    }
+
+    // Recomputes (and caches, per artUrl) a dominant color sampled from the
+    // current album art. Falls back to the fixed accent-color setting when
+    // tinting is disabled, there's no art, or extraction fails (e.g. remote
+    // art URL, unreadable file).
+    _updateTintCache(artUrl) {
+        if (!artUrl || !this._settings.get_boolean('color-tint-enabled')) {
+            this._lastArtUrlForTint = artUrl || null;
+            this._cachedTint = null;
+            return;
+        }
+        if (artUrl === this._lastArtUrlForTint)
+            return;
+        this._lastArtUrlForTint = artUrl;
+        this._cachedTint = extractDominantColor(artUrl);
+    }
+
+    _effectiveAccentColor() {
+        return this._cachedTint ? this._cachedTint.hex : this._accentColor();
     }
 
     _easeIsland(params) {
@@ -432,6 +536,14 @@ class DynamicIsland extends St.BoxLayout {
                 mode: Clutter.AnimationMode.EASE_OUT_BACK,
             });
         };
+        // Stop the press/release here rather than propagating: these buttons
+        // already have their own 'clicked' handler, so letting the event
+        // bubble up made every button tap also feed the island's own
+        // press/hold/click-count gesture machinery (_onPress/_onRelease) —
+        // a quick play/pause tap that ran a touch past LONG_PRESS_MS would
+        // fire _onHold() and unpin/collapse the expanded media view out from
+        // under the user, and two quick taps on any control could register
+        // as an island-level double-click and toggle the notification queue.
         button.connect('button-press-event', () => {
             button.remove_all_transitions();
             button.ease({
@@ -440,9 +552,12 @@ class DynamicIsland extends St.BoxLayout {
                 duration: 100,
                 mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             });
-            return Clutter.EVENT_PROPAGATE;
+            return Clutter.EVENT_STOP;
         });
-        button.connect('button-release-event', restore);
+        button.connect('button-release-event', () => {
+            restore();
+            return Clutter.EVENT_STOP;
+        });
         button.connect('leave-event', restore);
     }
 
@@ -462,9 +577,19 @@ class DynamicIsland extends St.BoxLayout {
             this._icon.remove_style_class_name('dynamic-island-icon-art');
     }
 
+    // 'system' mirrors org.gnome.desktop.interface's own clock-format so the
+    // island matches the top-bar clock unless the user explicitly overrides it.
+    _resolveClockFormat() {
+        const pref = this._settings.get_string('clock-format');
+        if (pref === '24h' || pref === '12h')
+            return pref;
+        return this._interfaceSettings.get_string('clock-format') === '12h' ? '12h' : '24h';
+    }
+
     _updateClock() {
         const now = GLib.DateTime.new_now_local();
-        this._clockLabel.set_text(now.format('%a %b %d  %H:%M'));
+        const timeFmt = this._resolveClockFormat() === '12h' ? '%I:%M %p' : '%H:%M';
+        this._clockLabel.set_text(now.format(`%a %b %d  ${timeFmt}`));
     }
 
     _getNotificationCount() {
@@ -491,13 +616,24 @@ class DynamicIsland extends St.BoxLayout {
     }
 
     _isIdle() {
-        return !this._mediaMode && !this._notificationShowing && !this._queueShowing;
+        return !this._mediaMode && !this._timerActive && !this._notificationShowing &&
+            !this._transientShowing && !this._queueShowing;
     }
 
     _onEnter() {
         this._isHovered = true;
-        if (this._mediaMode && !this._notificationShowing && !this._queueShowing) {
-            this._renderMedia();
+        // Cancel any pending leave-debounce (see _onLeave) — either a real
+        // re-entry, or the tail end of a click on an internal control.
+        if (this._leaveDebounceId) {
+            GLib.source_remove(this._leaveDebounceId);
+            this._leaveDebounceId = null;
+        }
+        if (this._notificationShowing || this._transientShowing) {
+            // Give the user as long as they want to read/click it — the
+            // auto-collapse timer resumes from _onLeave once they stop hovering.
+            this._clearCollapseTimeout();
+        } else if ((this._mediaMode || this._timerActive) && !this._queueShowing) {
+            this._renderActive();
         } else if (this._isIdle()) {
             this.ease({
                 scale_x: 1.03,
@@ -509,10 +645,30 @@ class DynamicIsland extends St.BoxLayout {
     }
 
     _onLeave() {
+        if (this._notificationShowing || this._transientShowing) {
+            this._isHovered = false;
+            this._restartCollapseTimeout();
+            return;
+        }
+        if ((this._mediaMode || this._timerActive) && !this._queueShowing) {
+            // Debounce rather than collapsing immediately: pressing a media
+            // control (play/pause, prev/next) can fire a spurious hover-leave
+            // blip as St.Button grabs the pointer for the click, which would
+            // otherwise flash-collapse the expanded pill mid-interaction.
+            // _isHovered intentionally stays true during the grace window so
+            // _renderMedia()'s pinned/hovered check still reads as "expanded".
+            if (this._leaveDebounceId)
+                GLib.source_remove(this._leaveDebounceId);
+            this._leaveDebounceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 180, () => {
+                this._leaveDebounceId = null;
+                this._isHovered = false;
+                this._renderActive();
+                return GLib.SOURCE_REMOVE;
+            });
+            return;
+        }
         this._isHovered = false;
-        if (this._mediaMode && !this._notificationShowing && !this._queueShowing) {
-            this._renderMedia();
-        } else if (this._isIdle()) {
+        if (this._isIdle()) {
             this.ease({
                 scale_x: 1,
                 scale_y: 1,
@@ -522,12 +678,205 @@ class DynamicIsland extends St.BoxLayout {
         }
     }
 
+    // --- Timer (persistent countdown, started from the right-click menu) ---
+
+    _onRightClick() {
+        if (this._queueShowing || this._notificationShowing || this._transientShowing)
+            return;
+        if (this._timerMenu.visible)
+            this._hideTimerMenu();
+        else
+            this._showTimerMenu();
+    }
+
+    _showTimerMenu() {
+        this._timerCancelButton.visible = this._timerActive;
+        const [, naturalWidth] = this._timerMenu.get_preferred_width(-1);
+        const [, naturalHeight] = this._timerMenu.get_preferred_height(-1);
+        this._timerMenu.set_size(naturalWidth, naturalHeight);
+
+        const [islandX, islandY] = this.get_transformed_position();
+        this._timerMenu.set_position(
+            Math.round(islandX + this.width / 2 - naturalWidth / 2),
+            Math.round(islandY + this.height + 8));
+
+        this._timerMenu.remove_all_transitions();
+        this._timerMenu.opacity = 0;
+        this._timerMenu.show();
+        this._timerMenu.ease({
+            opacity: 255,
+            duration: 150,
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+        });
+        this._connectTimerMenuClickOutside();
+    }
+
+    _hideTimerMenu() {
+        this._disconnectTimerMenuClickOutside();
+        this._timerMenu.remove_all_transitions();
+        this._timerMenu.ease({
+            opacity: 0,
+            duration: 120,
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            onComplete: () => this._timerMenu.hide(),
+        });
+    }
+
+    // Any click outside the menu (or the island itself) closes it, same
+    // pattern as a notification's click-anywhere-to-dismiss.
+    _connectTimerMenuClickOutside() {
+        if (this._timerMenuClickId)
+            return;
+        this._timerMenuClickId = global.stage.connect('captured-event', (actor, event) => {
+            if (event.type() !== Clutter.EventType.BUTTON_PRESS)
+                return Clutter.EVENT_PROPAGATE;
+            const source = event.get_source();
+            if (source && (this._timerMenu.contains(source) || this.contains(source)))
+                return Clutter.EVENT_PROPAGATE;
+            this._hideTimerMenu();
+            return Clutter.EVENT_PROPAGATE;
+        });
+    }
+
+    _disconnectTimerMenuClickOutside() {
+        if (this._timerMenuClickId) {
+            global.stage.disconnect(this._timerMenuClickId);
+            this._timerMenuClickId = null;
+        }
+    }
+
+    _startTimer(minutes) {
+        this._hideTimerMenu();
+        this._timerActive = true;
+        this._timerTotalSeconds = minutes * 60;
+        this._timerEndUs = GLib.get_monotonic_time() + this._timerTotalSeconds * 1000000;
+        this._startTimerPolling();
+        this._renderActive();
+    }
+
+    _cancelTimer() {
+        this._hideTimerMenu();
+        this._stopTimerPolling();
+        this._timerActive = false;
+        this._renderActive();
+    }
+
+    _startTimerPolling() {
+        this._stopTimerPolling();
+        const tick = () => {
+            if (!this._timerActive) {
+                this._timerPollId = null;
+                return GLib.SOURCE_REMOVE;
+            }
+            const remainingUs = this._timerEndUs - GLib.get_monotonic_time();
+            if (remainingUs <= 0) {
+                this._timerPollId = null;
+                this._timerActive = false;
+                this._renderActive();
+                this.showTransient('alarm-symbolic', 'Timer', "Time's up",
+                    TRANSIENT_DISPLAY_MS, true);
+                return GLib.SOURCE_REMOVE;
+            }
+            // Cheap text-only refresh every tick — _renderTimerOnly()'s full
+            // path (icon/style/_collapse()) only needs to run once, on entry;
+            // re-running it every second would restart the resize/ease
+            // machinery needlessly for as long as the timer runs (up to 1800
+            // times for a 30-minute timer) even though nothing but the digits
+            // actually changed.
+            if (this._mediaMode)
+                this._updateTimerBadge();
+            else if (!this._queueShowing && !this._notificationShowing && !this._transientShowing)
+                this._bodyLabel.set_text(this._formatTimerRemaining());
+            return GLib.SOURCE_CONTINUE;
+        };
+        tick();
+        this._timerPollId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, tick);
+    }
+
+    _stopTimerPolling() {
+        if (this._timerPollId) {
+            GLib.source_remove(this._timerPollId);
+            this._timerPollId = null;
+        }
+    }
+
+    _formatTimerRemaining() {
+        const remainingUs = Math.max(0, this._timerEndUs - GLib.get_monotonic_time());
+        return formatTime(remainingUs);
+    }
+
+    // Shows the compact accessory chip only when timer + media are both
+    // active — the "merged islands" look. Timer-only uses the main
+    // icon/text slot instead (see _renderTimerOnly).
+    _updateTimerBadge() {
+        if (!this._timerActive || !this._mediaMode || this._queueShowing) {
+            this._timerBadge.hide();
+            return;
+        }
+        this._timerBadgeLabel.set_text(this._formatTimerRemaining());
+        this._timerBadge.show();
+    }
+
+    // Dispatches to whichever persistent activity (or activities) are
+    // running: media alone, timer alone, both merged, or neither (idle).
+    _renderActive() {
+        this._updateTimerBadge();
+        if (this._mediaMode)
+            this._renderMedia();
+        else if (this._timerActive)
+            this._renderTimerOnly();
+        else
+            this._collapse();
+    }
+
+    // Timer with no media playing: takes over the main icon/text slot
+    // (like the persistent media mini-pill) showing a clock icon + live
+    // countdown. Deliberately never expands — there's nothing more to reveal
+    // and cancelling is via the right-click menu, not a hover/hold gesture.
+    _renderTimerOnly() {
+        if (this._queueShowing || this._notificationShowing || this._transientShowing)
+            return;
+
+        this._clockLabel.hide();
+        this._badgeLabel.hide();
+        this._timerBadge.hide();
+
+        this._setIconArtMode(false);
+        this._icon.set_style('');
+        this._icon.set_icon_name('alarm-symbolic');
+        this._icon.show();
+        this._easeIconSize(MEDIA_ICON_COLLAPSED_SIZE);
+
+        this._titleLabel.set_text('Timer');
+        this._bodyLabel.set_text(this._formatTimerRemaining());
+        this._bodyLabel.visible = true;
+        this._textBox.show();
+
+        this._mediaButton.hide();
+        this._prevButton.hide();
+        this._nextButton.hide();
+        this._progressRow.hide();
+        this._stopPositionPolling();
+        this._stopPulse();
+
+        this._collapse();
+    }
+
     // Press-and-hold is the only way to expand/collapse the pinned music
     // view, kept separate from click-counting so it never competes with
     // the queue's double-click toggle. Started on button-press and
     // cancelled on release; if it fires, the matching button-release must
     // not also be treated as a click.
-    _onPress() {
+    _onPress(event) {
+        // Right-click is a completely separate gesture (the timer quick-menu)
+        // and must never fall into the left-click hold/multi-click machinery.
+        if (event.get_button() === 3) {
+            this._onRightClick();
+            return Clutter.EVENT_STOP;
+        }
+        if (this._timerMenu.visible)
+            this._hideTimerMenu();
+
         this._longPressFired = false;
         if (this._pressTimeoutId)
             GLib.source_remove(this._pressTimeoutId);
@@ -540,7 +889,10 @@ class DynamicIsland extends St.BoxLayout {
         return Clutter.EVENT_PROPAGATE;
     }
 
-    _onRelease() {
+    _onRelease(event) {
+        if (event.get_button() === 3)
+            return Clutter.EVENT_STOP; // already acted on in _onPress; swallow the release too
+
         if (this._pressTimeoutId) {
             GLib.source_remove(this._pressTimeoutId);
             this._pressTimeoutId = null;
@@ -559,7 +911,7 @@ class DynamicIsland extends St.BoxLayout {
         }
         if (this._mediaMode && !this._queueShowing) {
             this._isPinned = !this._isPinned;
-            this._renderMedia();
+            this._renderActive();
         }
     }
 
@@ -584,6 +936,10 @@ class DynamicIsland extends St.BoxLayout {
                 if (count >= 2) {
                     this._activateNotification();
                 }
+            } else if (this._transientShowing) {
+                // No app to open for a battery/Bluetooth blip — any tap just dismisses it.
+                this._clearCollapseTimeout();
+                this._closeTransientPill();
             } else if (count >= 2) {
                 this._onDoubleClick();
             }
@@ -608,6 +964,14 @@ class DynamicIsland extends St.BoxLayout {
             GLib.source_remove(this._clockTimeoutId);
             this._clockTimeoutId = null;
         }
+        if (this._clockFormatChangedId) {
+            this._settings.disconnect(this._clockFormatChangedId);
+            this._clockFormatChangedId = null;
+        }
+        if (this._systemClockFormatChangedId) {
+            this._interfaceSettings.disconnect(this._systemClockFormatChangedId);
+            this._systemClockFormatChangedId = null;
+        }
         if (this._clickTimeoutId) {
             GLib.source_remove(this._clickTimeoutId);
             this._clickTimeoutId = null;
@@ -617,11 +981,22 @@ class DynamicIsland extends St.BoxLayout {
             GLib.source_remove(this._pressTimeoutId);
             this._pressTimeoutId = null;
         }
+        if (this._leaveDebounceId) {
+            GLib.source_remove(this._leaveDebounceId);
+            this._leaveDebounceId = null;
+        }
         this._stopPositionPolling();
         this._stopPulse();
         this._stopQueueTimeRefresh();
+        this._stopTimerPolling();
         this._onSeekEnd();
         this._disconnectStageClickOutside();
+        this._disconnectTimerMenuClickOutside();
+        if (this._timerMenu) {
+            Main.layoutManager.removeChrome(this._timerMenu);
+            this._timerMenu.destroy();
+            this._timerMenu = null;
+        }
     }
 
     // A notification only opens on a double click on the pill itself
@@ -635,13 +1010,16 @@ class DynamicIsland extends St.BoxLayout {
         this._stageClickId = global.stage.connect('captured-event', (actor, event) => {
             if (event.type() !== Clutter.EventType.BUTTON_PRESS)
                 return Clutter.EVENT_PROPAGATE;
-            if (!this._notificationShowing)
+            if (!this._notificationShowing && !this._transientShowing)
                 return Clutter.EVENT_PROPAGATE;
             const source = event.get_source();
             if (source && this.contains(source))
                 return Clutter.EVENT_PROPAGATE;
             this._clearCollapseTimeout();
-            this._dismissNotification();
+            if (this._transientShowing)
+                this._closeTransientPill();
+            else
+                this._dismissNotification();
             return Clutter.EVENT_PROPAGATE;
         });
     }
@@ -765,15 +1143,14 @@ class DynamicIsland extends St.BoxLayout {
         this._queueContainer.hide();
         this._queueStickyHeader.hide();
 
-        if (this._mediaMode) {
-            this._renderMedia();
-        } else {
-            this._collapse();
-        }
+        this._renderActive();
     }
 
     _addSourceGroupToQueue(source) {
         const isMuted = this._muteHandlers ? this._muteHandlers.isMuted(source.title) : false;
+        // Resolved once and reused below — it can fall back to an O(n) scan
+        // over running apps, not worth paying for twice per source.
+        const sourceIcon = resolveNotificationIcon(source, null);
 
         const headerRow = new St.BoxLayout({
             style_class: 'dynamic-island-queue-group-header',
@@ -781,7 +1158,7 @@ class DynamicIsland extends St.BoxLayout {
             x_expand: true,
         });
         const appIcon = new St.Icon({
-            gicon: resolveNotificationIcon(source, null),
+            gicon: sourceIcon,
             style_class: 'dynamic-island-queue-group-icon',
             y_align: Clutter.ActorAlign.CENTER,
         });
@@ -791,6 +1168,9 @@ class DynamicIsland extends St.BoxLayout {
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
         });
+        // Without ellipsizing, a long app name pushes the mute button out of
+        // the row (or off the clipped island entirely) instead of truncating.
+        appLabel.clutter_text.set_ellipsize(3); // PANGO_ELLIPSIZE_END
         const muteBtn = new St.Button({
             style_class: isMuted ? 'dynamic-island-mute-btn dynamic-island-mute-btn-active' : 'dynamic-island-mute-btn',
             y_align: Clutter.ActorAlign.CENTER,
@@ -814,7 +1194,7 @@ class DynamicIsland extends St.BoxLayout {
 
         this._queueGroups.push({
             headerRow,
-            gicon: resolveNotificationIcon(source, null),
+            gicon: sourceIcon,
             title: source.title || 'Notifications',
         });
 
@@ -881,6 +1261,9 @@ class DynamicIsland extends St.BoxLayout {
         });
         let titleLabel = new St.Label({ text: titleText, style_class: 'dynamic-island-queue-title', x_align: Clutter.ActorAlign.START });
         let bodyLabel = new St.Label({ text: bodyText, style_class: 'dynamic-island-queue-body' });
+        // Same overflow problem as the group title: an unellipsized long
+        // title pushes the close button out of the (clipped) queue row.
+        titleLabel.clutter_text.set_ellipsize(3); // PANGO_ELLIPSIZE_END
 
         textBox.add_child(timeLabel);
         textBox.add_child(titleLabel);
@@ -953,7 +1336,7 @@ class DynamicIsland extends St.BoxLayout {
             this._easeIconSize(MEDIA_ICON_COLLAPSED_SIZE);
         }
 
-        const isMedia = this._mediaMode && !this._notificationShowing;
+        const isMedia = this._mediaMode && !this._notificationShowing && !this._transientShowing;
         const showSeek = isMedia &&
             this._settings.get_boolean('show-seek-bar') &&
             this._lastMediaInfo && this._lastMediaInfo.length > 0;
@@ -1009,6 +1392,9 @@ class DynamicIsland extends St.BoxLayout {
         }
         this._clickCount = 0;
 
+        // A real notification always outranks a battery/Bluetooth blip.
+        this._transientShowing = false;
+
         this._notificationShowing = true;
         this._lastNotificationIcon = gicon;
         this._lastNotification = notification || null;
@@ -1022,6 +1408,7 @@ class DynamicIsland extends St.BoxLayout {
             this.remove_style_class_name('dynamic-island-urgent');
 
         this._setIconArtMode(true);
+        this._icon.set_style('');
         this._icon.set_gicon(gicon);
         this._icon.show();
 
@@ -1040,10 +1427,29 @@ class DynamicIsland extends St.BoxLayout {
         this._textBox.show();
         this._expand();
 
-        const displayMs = this._settings.get_int('display-duration-ms');
+        // Don't start the countdown if the pointer is already sitting on the
+        // pill when the notification lands — _onLeave will start it once the
+        // user actually moves away, same as the hover-pause path.
+        if (!this._isHovered)
+            this._restartCollapseTimeout();
+    }
+
+    // (Re)starts the auto-collapse countdown for the currently showing
+    // notification or transient pill. Used both to kick it off initially and
+    // to resume it from _onLeave after the pointer stops hovering (see
+    // _onEnter). Dispatches on which one is actually showing since both
+    // share this same timer/widget plumbing.
+    _restartCollapseTimeout() {
+        this._clearCollapseTimeout();
+        const displayMs = this._transientShowing
+            ? this._transientDurationMs
+            : this._settings.get_int('display-duration-ms');
         this._collapseTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, displayMs, () => {
             this._collapseTimeoutId = null;
-            this._closeNotificationPopup();
+            if (this._transientShowing)
+                this._closeTransientPill();
+            else
+                this._closeNotificationPopup();
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -1057,11 +1463,7 @@ class DynamicIsland extends St.BoxLayout {
         this._notifCloseButton.hide();
         this.remove_style_class_name('dynamic-island-urgent');
         this._refreshBadge();
-
-        if (this._mediaMode)
-            this._renderMedia(); // fall back to the persistent media pill
-        else
-            this._collapse();
+        this._renderActive(); // fall back to whatever persistent activity (media/timer) is running
     }
 
     _clearCollapseTimeout() {
@@ -1069,6 +1471,61 @@ class DynamicIsland extends St.BoxLayout {
             GLib.source_remove(this._collapseTimeoutId);
             this._collapseTimeoutId = null;
         }
+    }
+
+    // --- Transient system pills (battery/Bluetooth blips) ---------------
+    //
+    // Lower priority than a real notification and never queued: if a
+    // notification, another transient, or the queue is already showing, the
+    // event is just dropped rather than interrupting or stacking up. Reuses
+    // the same icon/title/body/close widgets as showNotification() (they can
+    // never be visible at the same time) and the same hover-pause /
+    // auto-collapse timer plumbing via _restartCollapseTimeout().
+
+    showTransient(iconName, title, subtitle, durationMs, urgent = false) {
+        if (this._queueShowing || this._notificationShowing || this._transientShowing)
+            return;
+
+        this._stopPositionPolling();
+        this._progressRow.hide();
+
+        this._transientShowing = true;
+        this._transientDurationMs = durationMs;
+        this._connectStageClickOutside();
+        this._clockLabel.hide();
+        this._badgeLabel.hide();
+
+        if (urgent)
+            this.add_style_class_name('dynamic-island-urgent');
+        else
+            this.remove_style_class_name('dynamic-island-urgent');
+
+        this._setIconArtMode(false);
+        this._icon.set_style('');
+        this._icon.set_icon_name(iconName);
+        this._icon.show();
+
+        this._mediaButton.hide();
+        this._prevButton.hide();
+        this._nextButton.hide();
+        this._notifCloseButton.show();
+        this._titleLabel.set_text(title || '');
+        this._bodyLabel.set_text(subtitle || '');
+        this._bodyLabel.visible = !!(subtitle && subtitle.length > 0);
+
+        this._textBox.show();
+        this._expand();
+
+        if (!this._isHovered)
+            this._restartCollapseTimeout();
+    }
+
+    _closeTransientPill() {
+        this._transientShowing = false;
+        this._disconnectStageClickOutside();
+        this._notifCloseButton.hide();
+        this.remove_style_class_name('dynamic-island-urgent');
+        this._renderActive();
     }
 
     // Clicking the pill body while a notification is showing opens/focuses
@@ -1116,8 +1573,13 @@ class DynamicIsland extends St.BoxLayout {
             this._progressRow.hide();
             this._stopPositionPolling();
             this._stopPulse();
-            if (!this._notificationShowing && !this._queueShowing)
-                this._collapse();
+            this._lastArtUrlForTint = null;
+            this._cachedTint = null;
+            // Not a bare _collapse(): if a timer is still running, this needs
+            // to re-render into the timer-only slot (alarm icon + countdown),
+            // not just resize while leaving the stale media art/title showing.
+            if (!this._notificationShowing && !this._transientShowing && !this._queueShowing)
+                this._renderActive();
             return;
         }
 
@@ -1130,12 +1592,12 @@ class DynamicIsland extends St.BoxLayout {
         this._onMediaRaise = info.raise;
         this._queryPosition = info.queryPosition;
 
-        if (!this._notificationShowing && !this._queueShowing)
-            this._renderMedia();
+        if (!this._notificationShowing && !this._transientShowing && !this._queueShowing)
+            this._renderActive();
     }
 
     _renderMedia() {
-        if (this._queueShowing) return;
+        if (this._queueShowing || this._transientShowing) return;
 
         const info = this._lastMediaInfo;
         if (!info)
@@ -1144,18 +1606,25 @@ class DynamicIsland extends St.BoxLayout {
         this._clockLabel.hide();
         this._badgeLabel.hide();
 
+        this._updateTintCache(info.artUrl);
+
         if (info.artUrl) {
             try {
                 const file = Gio.File.new_for_uri(info.artUrl);
                 this._setIconArtMode(true);
                 this._icon.set_gicon(new Gio.FileIcon({ file }));
+                this._icon.set_style(this._cachedTint
+                    ? `box-shadow: 0 0 10px rgba(${this._cachedTint.r}, ${this._cachedTint.g}, ${this._cachedTint.b}, 0.55);`
+                    : '');
             } catch (e) {
                 this._setIconArtMode(false);
                 this._icon.set_icon_name('audio-x-generic-symbolic');
+                this._icon.set_style('');
             }
         } else {
             this._setIconArtMode(false);
             this._icon.set_icon_name('audio-x-generic-symbolic');
+            this._icon.set_style('');
         }
         this._icon.show();
         if (info.artUrl) {
@@ -1192,7 +1661,7 @@ class DynamicIsland extends St.BoxLayout {
 
             if (this._settings.get_boolean('show-seek-bar') && info.length > 0) {
                 this._progressRow.show();
-                this._progressFill.set_style(`background-color: ${this._accentColor()};`);
+                this._progressFill.set_style(`background-color: ${this._effectiveAccentColor()};`);
                 this._startPositionPolling();
             } else {
                 this._progressRow.hide();
@@ -1350,18 +1819,30 @@ class DynamicIsland extends St.BoxLayout {
         this._easeIconSize(MEDIA_ICON_COLLAPSED_SIZE);
 
         // A persistent media pill (icon + title, no controls) hugs its
-        // content; the true idle pill (clock only) hugs its own (much
-        // narrower) content too, just within a tighter range.
+        // content; a timer-only pill (icon + countdown) hugs its own
+        // (narrower still) content; the true idle pill (clock only) hugs its
+        // own content too, within the tightest range.
         const isCollapsedMedia = this._mediaMode && !this._notificationShowing;
-        
-        if (isCollapsedMedia) {
+        const isCollapsedTimerOnly = this._timerActive && !this._mediaMode && !this._notificationShowing;
+
+        if (isCollapsedMedia || isCollapsedTimerOnly) {
             this.add_style_class_name('dynamic-island-compact-music');
         } else {
             this.remove_style_class_name('dynamic-island-compact-music');
+            // The badge only ever renders in this plain idle (clock) state.
+            // Refresh it *before* measuring content width below — otherwise
+            // a notification that arrived mid-animation (or between renders)
+            // gets its badge shown against a width that was sized for the
+            // clock alone, clipping the badge against the pill's edge.
+            this._refreshBadge();
         }
-        const targetWidth = isCollapsedMedia
-            ? this._computeContentWidth(MIN_COLLAPSED_MEDIA_WIDTH, MAX_COLLAPSED_MEDIA_WIDTH)
-            : this._computeContentWidth(MIN_COLLAPSED_WIDTH, MAX_COLLAPSED_WIDTH);
+        let targetWidth;
+        if (isCollapsedMedia)
+            targetWidth = this._computeContentWidth(MIN_COLLAPSED_MEDIA_WIDTH, MAX_COLLAPSED_MEDIA_WIDTH);
+        else if (isCollapsedTimerOnly)
+            targetWidth = this._computeContentWidth(MIN_COLLAPSED_TIMER_WIDTH, MAX_COLLAPSED_TIMER_WIDTH);
+        else
+            targetWidth = this._computeContentWidth(MIN_COLLAPSED_WIDTH, MAX_COLLAPSED_WIDTH);
 
         const monitor = Main.layoutManager.primaryMonitor;
         const targetX = monitor ? monitor.x + monitor.width / 2 - targetWidth / 2 : this.x;
@@ -1373,15 +1854,15 @@ class DynamicIsland extends St.BoxLayout {
             duration: this._animMs(),
             mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
             onComplete: () => {
-                if (!this._notificationShowing && !this._mediaMode && !this._queueShowing) {
+                if (!this._notificationShowing && !this._mediaMode && !this._timerActive && !this._queueShowing) {
                     this._textBox.hide();
                     this._icon.hide();
                     this._mediaButton.hide();
                     this._prevButton.hide();
                     this._nextButton.hide();
                     this._clockLabel.show();
-                    this._refreshBadge();
-                } else if (this._mediaMode && !this._isHovered && !this._isPinned && !this._notificationShowing) {
+                } else if ((this._mediaMode || this._timerActive) &&
+                           !this._isHovered && !this._isPinned && !this._notificationShowing) {
                     this._mediaButton.hide();
                     this._prevButton.hide();
                     this._nextButton.hide();
@@ -1447,6 +1928,38 @@ export default class DynamicIslandExtension extends Extension {
                 info.queryPosition = cb => this._mediaWatcher.queryPosition(cb);
             this._island.setMedia(!!info, info);
         });
+
+        // --- Battery (UPower) ---
+        this._batteryWatcher = new BatteryWatcher();
+        this._batteryChangedId = this._batteryWatcher.connect('changed', () => {
+            const event = this._batteryWatcher.takePendingEvent();
+            if (!event || !this._settings.get_boolean('battery-alerts-enabled'))
+                return;
+
+            const pct = Math.round(event.percentage);
+            if (event.type === 'plugged') {
+                this._island.showTransient('battery-good-charging-symbolic',
+                    'Charging', `${pct}%`, TRANSIENT_DISPLAY_MS);
+            } else if (event.type === 'unplugged') {
+                this._island.showTransient('battery-good-symbolic',
+                    'On Battery', `${pct}%`, TRANSIENT_DISPLAY_MS);
+            } else if (event.type === 'low') {
+                this._island.showTransient('battery-caution-symbolic',
+                    'Low Battery', `${pct}% remaining`, TRANSIENT_DISPLAY_MS, true);
+            }
+        });
+
+        // --- Bluetooth (BlueZ) ---
+        this._bluetoothWatcher = new BluetoothWatcher();
+        this._bluetoothChangedId = this._bluetoothWatcher.connect('changed', () => {
+            const event = this._bluetoothWatcher.takePendingEvent();
+            if (!event || !this._settings.get_boolean('bluetooth-alerts-enabled'))
+                return;
+
+            this._island.showTransient(event.icon, event.name,
+                event.type === 'connected' ? 'Connected' : 'Disconnected',
+                TRANSIENT_DISPLAY_MS);
+        });
     }
 
     _updateShowBanners() {
@@ -1473,6 +1986,12 @@ export default class DynamicIslandExtension extends Extension {
     _onNotification(source, notification) {
         notification._diReceivedTime = GLib.DateTime.new_now_local();
         this._island._refreshBadge();
+        // If nothing else is about to re-render the pill (disabled/muted —
+        // no popup follows below), the idle clock pill's width was sized
+        // before this badge existed. Resize now, or the badge clips against
+        // the pill's edge instead of getting room next to the clock.
+        if (this._island._isIdle())
+            this._island._collapse();
 
         if (!this._settings.get_boolean('notifications-enabled'))
             return;
@@ -1533,6 +2052,20 @@ export default class DynamicIslandExtension extends Extension {
                 this._mediaWatcher.disconnect(this._mediaChangedId);
             this._mediaWatcher.destroy();
             this._mediaWatcher = null;
+        }
+
+        if (this._batteryWatcher) {
+            if (this._batteryChangedId)
+                this._batteryWatcher.disconnect(this._batteryChangedId);
+            this._batteryWatcher.destroy();
+            this._batteryWatcher = null;
+        }
+
+        if (this._bluetoothWatcher) {
+            if (this._bluetoothChangedId)
+                this._bluetoothWatcher.disconnect(this._bluetoothChangedId);
+            this._bluetoothWatcher.destroy();
+            this._bluetoothWatcher = null;
         }
 
         if (this._island) {

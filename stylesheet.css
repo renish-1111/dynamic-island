@@ -7,6 +7,7 @@
     padding-right: 16px;
     spacing: 12px;
     border: 1px solid rgba(255, 255, 255, 0.15);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
     transition-duration: 250ms;
 }
 
@@ -117,8 +118,10 @@
     background-color: #ff5c5c;
     font-size: 9px;
     font-weight: 800;
+    text-align: center;
     border-radius: 10px;
-    padding: 1px 6px;
+    padding: 2px 6px;
+    min-width: 14px;
     margin-left: 6px;
 }
 
@@ -150,6 +153,7 @@
     margin-top: 16px;
     border-top: 1px solid rgba(255, 255, 255, 0.1);
     padding-top: 16px;
+    spacing: 14px;
 }
 
 .dynamic-island-queue-scroll {
@@ -253,7 +257,6 @@
     color: #ff6666;
     font-size: 10px;
     font-weight: 700;
-    margin-bottom: 14px;
     background-color: rgba(255, 102, 102, 0.1);
     border-radius: 16px;
     padding: 6px 14px;
@@ -262,4 +265,63 @@
 
 .dynamic-island-close-all:hover {
     background-color: rgba(255, 102, 102, 0.25);
+}
+
+.dynamic-island-timer-badge {
+    background-color: rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    padding: 3px 8px;
+    margin-left: 6px;
+    spacing: 4px;
+}
+
+.dynamic-island-timer-badge-icon {
+    color: rgba(255, 255, 255, 0.85);
+}
+
+.dynamic-island-timer-badge-label {
+    color: #ffffff;
+    font-size: 10px;
+    font-weight: 700;
+    font-family: 'Inter', '-apple-system', 'Segoe UI', 'Roboto', sans-serif;
+}
+
+.dynamic-island-timer-menu {
+    background-color: #0a0a0a;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 14px;
+    padding: 8px;
+    spacing: 4px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+
+.dynamic-island-timer-preset {
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: 'Inter', '-apple-system', 'Segoe UI', 'Roboto', sans-serif;
+    border-radius: 10px;
+    padding: 6px 10px;
+    text-align: left;
+    transition-duration: 150ms;
+}
+
+.dynamic-island-timer-preset:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+.dynamic-island-timer-cancel {
+    color: #ff6666;
+    font-size: 11px;
+    font-weight: 700;
+    font-family: 'Inter', '-apple-system', 'Segoe UI', 'Roboto', sans-serif;
+    border-radius: 10px;
+    padding: 6px 10px;
+    margin-top: 4px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    transition-duration: 150ms;
+}
+
+.dynamic-island-timer-cancel:hover {
+    background-color: rgba(255, 102, 102, 0.15);
 }

@@ -14,6 +14,7 @@ export default class DynamicIslandPreferences extends ExtensionPreferences {
         window.add(this._buildBehaviorPage(settings));
         window.add(this._buildNotificationsPage(settings));
         window.add(this._buildMediaPage(settings));
+        window.add(this._buildSystemPage(settings));
     }
 
     _buildBehaviorPage(settings) {
@@ -37,7 +38,23 @@ export default class DynamicIslandPreferences extends ExtensionPreferences {
             'Top offset', 'Gap between the screen edge and the island (px)',
             -20, 40, 1));
 
+        group.add(this._clockFormatRow(settings));
+
         return page;
+    }
+
+    _clockFormatRow(settings) {
+        const values = ['system', '24h', '12h'];
+        const row = new Adw.ComboRow({
+            title: 'Clock format',
+            subtitle: 'How the time is displayed on the collapsed pill',
+            model: new Gtk.StringList({ strings: ['Match system', '24-hour', '12-hour (AM/PM)'] }),
+        });
+        row.selected = Math.max(0, values.indexOf(settings.get_string('clock-format')));
+        row.connect('notify::selected', () => {
+            settings.set_string('clock-format', values[row.selected]);
+        });
+        return row;
     }
 
     _buildNotificationsPage(settings) {
@@ -99,7 +116,33 @@ export default class DynamicIslandPreferences extends ExtensionPreferences {
 
         const appearanceGroup = new Adw.PreferencesGroup({ title: 'Appearance' });
         page.add(appearanceGroup);
+        appearanceGroup.add(this._switchRow(settings, 'color-tint-enabled',
+            'Album-art color tint',
+            'Tint the seek bar and pulse with a color sampled from the current album art'));
         appearanceGroup.add(this._colorRow(settings));
+
+        return page;
+    }
+
+    _buildSystemPage(settings) {
+        const page = new Adw.PreferencesPage({
+            title: 'System',
+            icon_name: 'preferences-system-devices-symbolic',
+        });
+
+        const group = new Adw.PreferencesGroup({
+            title: 'System Alerts',
+            description: 'Brief pills for system events, separate from app notifications',
+        });
+        page.add(group);
+
+        group.add(this._switchRow(settings, 'battery-alerts-enabled',
+            'Battery alerts',
+            'Show a pill when the charger is plugged/unplugged or the battery gets low'));
+
+        group.add(this._switchRow(settings, 'bluetooth-alerts-enabled',
+            'Bluetooth alerts',
+            'Show a pill when a Bluetooth device connects or disconnects'));
 
         return page;
     }
