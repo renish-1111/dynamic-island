@@ -675,6 +675,7 @@ class DynamicIsland extends St.BoxLayout {
         const now = GLib.DateTime.new_now_local();
         const timeFmt = this._resolveClockFormat() === '12h' ? '%I:%M %p' : '%H:%M';
         this._clockLabel.set_text(now.format(`%a %b %d  ${timeFmt}`));
+        this._calWeekday?.set_text(now.format(`%A  ${timeFmt}`));
     }
 
     // The badge counts what the panel holds, not what the tray holds — they
@@ -1138,7 +1139,7 @@ class DynamicIsland extends St.BoxLayout {
     // today each time the panel opens (it may have been left on another month).
     _updateCalendarHeader() {
         const dt = GLib.DateTime.new_now_local();
-        this._calWeekday.set_text(dt.format('%A'));
+        this._updateClock();
         this._calDate.set_text(`${dt.format('%B')} ${dt.get_day_of_month()} ${dt.get_year()}`);
         if (this._calendar) {
             try {
