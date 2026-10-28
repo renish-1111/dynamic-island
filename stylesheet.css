@@ -7,13 +7,11 @@
     padding-right: 16px;
     spacing: 12px;
     border: 1px solid rgba(255, 255, 255, 0.15);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
     transition-duration: 250ms;
 }
 
 .dynamic-island-urgent {
-    border: 1px solid rgba(255, 90, 90, 0.55);
-    box-shadow: 0 0 0 2px rgba(255, 70, 70, 0.35);
+    border: 2px solid rgba(255, 90, 90, 0.7);
 }
 
 /* Collapsed pill: a 28px radius on a 40px-tall bar reads as a blob, so it
