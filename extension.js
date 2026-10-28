@@ -8,6 +8,7 @@ import Gio from 'gi://Gio';
 import Shell from 'gi://Shell';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as Calendar from 'resource:///org/gnome/shell/ui/calendar.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import { MediaWatcher } from './mediaWatcher.js';
@@ -17,7 +18,7 @@ import { extractDominantColor } from './colorExtract.js';
 
 const COLLAPSED_HEIGHT = 34;
 const MIN_COLLAPSED_WIDTH = 140;
-const MAX_COLLAPSED_WIDTH = 200;
+const MAX_COLLAPSED_WIDTH = 280;
 const MIN_COLLAPSED_MEDIA_WIDTH = 150;
 const MAX_COLLAPSED_MEDIA_WIDTH = 240;
 const MIN_COLLAPSED_TIMER_WIDTH = 130;
@@ -32,12 +33,15 @@ const EXPANDED_HEIGHT = 68;
 const EXPANDED_HEIGHT_WITH_SEEK = 100;
 const CONTENT_WIDTH_PADDING = 40;
 const MAX_BODY_CHARS = 80;
-const MAX_QUEUE_HEIGHT = 400;
-const MIN_QUEUE_WIDTH = 300;
-const MAX_QUEUE_WIDTH = 420;
+// Cards live until cleared, so the store needs a ceiling of its own.
+const MAX_STORED_NOTIFICATIONS = 50;
+const MAX_QUEUE_HEIGHT = 460;
+const MIN_QUEUE_WIDTH = 620;
+const MAX_QUEUE_WIDTH = 780;
 const MEDIA_ICON_COLLAPSED_SIZE = 24;
 const MEDIA_ICON_EXPANDED_SIZE = 40;
 const MEDIA_CONTROL_ICON_SIZE = 14;
+const SEEK_THUMB_SIZE = 12;
 const POSITION_POLL_MS = 1000;
 const PULSE_MS = 1400;
 const MULTI_CLICK_MS = 300;
@@ -50,6 +54,19 @@ function formatTime(micros) {
     const mins = Math.floor(totalSeconds / 60);
     const secs = totalSeconds % 60;
     return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+// When a notification arrived. Notifications already in the tray when the
+// extension was enabled never got stamped, so fall back to the tray's own
+// timestamp. Returns a GLib.DateTime or null.
+function notificationTime(notif) {
+    if (notif && notif._diReceivedTime)
+        return notif._diReceivedTime;
+    try {
+        return (notif && notif.datetime) || null;
+    } catch (e) {
+        return null; // older API
+    }
 }
 
 function formatRelativeTime(dateTime) {
@@ -65,19 +82,42 @@ function formatRelativeTime(dateTime) {
     return `${Math.floor(diffSeconds / 86400)}d ago`;
 }
 
+// The daemon only sets `source.app` for GApplication-backed sources; FDO
+// senders (notify-send, some Electron apps) leave it null, so fall back to
+// matching the source title against a running app.
+function findAppForSource(source) {
+    try {
+        if (source && source.app)
+            return source.app;
+    } catch (e) { /* not an app-backed source */ }
+
+    try {
+        const title = source && source.title;
+        if (title) {
+            return Shell.AppSystem.get_default().get_running()
+                .find(app => app.get_name().toLowerCase() === title.toLowerCase()) || null;
+        }
+    } catch (e) { /* ignore */ }
+
+    return null;
+}
+
 // Best-effort resolution of a "real" app icon for a notification, since the
 // notification daemon doesn't always attach a usable gicon. Tries the most
 // specific/authoritative source first and falls back to a themed icon.
 function resolveNotificationIcon(source, notification) {
-    try {
-        if (notification && notification.gicon)
-            return notification.gicon;
-    } catch (e) { /* older API */ }
-
+    // Prefer the real application icon — many apps attach a generic themed
+    // gicon to the notification itself, so the app's own icon is the branded
+    // one the user actually recognises.
     try {
         if (source && source.app && source.app.get_icon)
             return source.app.get_icon();
     } catch (e) { /* not an app-backed source */ }
+
+    try {
+        if (notification && notification.gicon)
+            return notification.gicon;
+    } catch (e) { /* older API */ }
 
     try {
         if (source && source.icon)
@@ -90,13 +130,9 @@ function resolveNotificationIcon(source, notification) {
     } catch (e) { /* ignore */ }
 
     try {
-        const title = source && source.title;
-        if (title) {
-            const match = Shell.AppSystem.get_default().get_running()
-                .find(app => app.get_name().toLowerCase() === title.toLowerCase());
-            if (match)
-                return match.get_icon();
-        }
+        const app = findAppForSource(source);
+        if (app)
+            return app.get_icon();
     } catch (e) { /* ignore */ }
 
     return new Gio.ThemedIcon({ name: 'preferences-system-notifications-symbolic' });
@@ -119,6 +155,7 @@ class DynamicIsland extends St.BoxLayout {
         this._interfaceSettings = new Gio.Settings({ schema_id: 'org.gnome.desktop.interface' });
 
         this._topBox = new St.BoxLayout({
+            style_class: 'dynamic-island-top-row',
             vertical: false,
             x_align: Clutter.ActorAlign.CENTER,
             y_align: Clutter.ActorAlign.CENTER,
@@ -193,16 +230,23 @@ class DynamicIsland extends St.BoxLayout {
         this._progressBg = new St.Widget({
             style_class: 'dynamic-island-progress-bg',
             reactive: true,
+            track_hover: true,
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
         });
         this._progressFill = new St.Widget({ style_class: 'dynamic-island-progress-fill' });
+        this._progressThumb = new St.Widget({ style_class: 'dynamic-island-progress-thumb', opacity: 0 });
         this._progressBg.add_child(this._progressFill);
+        this._progressBg.add_child(this._progressThumb);
         this._seeking = false;
         this._seekMotionId = null;
         this._seekReleaseId = null;
         this._pendingSeekFraction = null;
         this._progressBg.connect('button-press-event', (actor, event) => this._onSeekStart(actor, event));
+        // Round scrub handle only earns its keep while the bar is actually
+        // usable: reveal it on hover, and keep it visible for the whole drag
+        // even if a fast flick carries the pointer off the (thin) track.
+        this._progressBg.connect('notify::hover', () => this._updateSeekThumbVisibility());
         // The bg only gets a real width once it's actually allocated by the layout
         // (e.g. right after it goes from hidden to visible, or mid resize-animation).
         // Re-render the fill whenever that allocation lands instead of waiting for
@@ -322,11 +366,20 @@ class DynamicIsland extends St.BoxLayout {
         this.add_child(this._topBox);
         this.add_child(this._progressRow);
 
-        // Queue Container
+        // Expanded panel: notifications on the left, calendar on the right
+        // (mirrors GNOME's own date-menu dropdown).
         this._queueContainer = new St.BoxLayout({
             style_class: 'dynamic-island-queue-container',
-            vertical: true,
+            vertical: false,
             visible: false,
+            x_expand: true,
+            y_expand: true,
+        });
+
+        // --- Left pane: notifications ---
+        this._notifPane = new St.BoxLayout({
+            style_class: 'dynamic-island-notif-pane',
+            vertical: true,
             x_expand: true,
             y_expand: true,
         });
@@ -351,28 +404,6 @@ class DynamicIsland extends St.BoxLayout {
         headerBox.add_child(headerTitle);
         headerBox.add_child(this._closeAllButton);
 
-        // Overlaid above the scroll view; shown only once the real header for
-        // the currently-visible group has scrolled out of view, so long queues
-        // read like sectioned lists instead of losing track of whose group
-        // you're looking at.
-        this._queueStickyHeader = new St.BoxLayout({
-            style_class: 'dynamic-island-queue-group-header dynamic-island-queue-sticky-header',
-            vertical: false,
-            visible: false,
-            x_expand: true,
-        });
-        this._queueStickyIcon = new St.Icon({
-            style_class: 'dynamic-island-queue-group-icon',
-            y_align: Clutter.ActorAlign.CENTER,
-        });
-        this._queueStickyTitle = new St.Label({
-            style_class: 'dynamic-island-queue-group-title',
-            x_expand: true,
-            y_align: Clutter.ActorAlign.CENTER,
-        });
-        this._queueStickyHeader.add_child(this._queueStickyIcon);
-        this._queueStickyHeader.add_child(this._queueStickyTitle);
-
         this._queueScroll = new St.ScrollView({
             style_class: 'dynamic-island-queue-scroll',
             hscrollbar_policy: St.PolicyType.NEVER,
@@ -386,13 +417,66 @@ class DynamicIsland extends St.BoxLayout {
             x_expand: true,
         });
         this._queueScroll.add_child(this._queueBox);
-        this._queueScroll.vadjustment.connect('notify::value', () => this._updateStickyHeader());
 
-        this._queueGroups = [];
+        // Shown instead of the scroll view when there are no notifications.
+        this._queueEmpty = new St.BoxLayout({
+            style_class: 'dynamic-island-queue-empty',
+            vertical: true,
+            x_expand: true,
+            y_expand: true,
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER,
+            visible: false,
+        });
+        this._queueEmpty.add_child(new St.Icon({
+            icon_name: 'preferences-system-notifications-symbolic',
+            style_class: 'dynamic-island-queue-empty-icon',
+            x_align: Clutter.ActorAlign.CENTER,
+        }));
+        this._queueEmpty.add_child(new St.Label({
+            text: 'No Notifications',
+            style_class: 'dynamic-island-queue-empty-label',
+            x_align: Clutter.ActorAlign.CENTER,
+        }));
 
-        this._queueContainer.add_child(headerBox);
-        this._queueContainer.add_child(this._queueStickyHeader);
-        this._queueContainer.add_child(this._queueScroll);
+        this._notifPane.add_child(headerBox);
+        this._notifPane.add_child(this._queueScroll);
+        this._notifPane.add_child(this._queueEmpty);
+
+        // --- Right pane: date header + month calendar ---
+        this._calendarPane = new St.BoxLayout({
+            style_class: 'dynamic-island-calendar-pane',
+            vertical: true,
+        });
+        this._calWeekday = new St.Label({
+            style_class: 'dynamic-island-cal-weekday',
+            x_align: Clutter.ActorAlign.START,
+        });
+        this._calDate = new St.Label({
+            style_class: 'dynamic-island-cal-date',
+            x_align: Clutter.ActorAlign.START,
+        });
+        this._calendarPane.add_child(this._calWeekday);
+        this._calendarPane.add_child(this._calDate);
+        // Reuse GNOME Shell's own calendar widget (same one in the top-bar
+        // date menu) so month nav / today-highlight / weekday headers come
+        // for free. Guarded: if the internal API ever shifts, the pane just
+        // shows the date header without crashing enable().
+        try {
+            this._calendar = new Calendar.Calendar();
+            // The Calendar constructor only builds the nav + weekday header;
+            // the day grid is built by _rebuildCalendar(), which only runs once
+            // an event source is set (setDate(today) no-ops via its sameDay
+            // guard). Without this the pane shows a header but no days.
+            this._calendar.setEventSource(new Calendar.EmptyEventSource());
+            this._calendarPane.add_child(this._calendar);
+        } catch (e) {
+            logError(e, 'DynamicIsland: calendar widget init failed');
+            this._calendar = null;
+        }
+
+        this._queueContainer.add_child(this._notifPane);
+        this._queueContainer.add_child(this._calendarPane);
 
         this.add_child(this._queueContainer);
 
@@ -455,11 +539,14 @@ class DynamicIsland extends St.BoxLayout {
         this._pressTimeoutId = null;
         this._longPressFired = false;
         this._stageClickId = null;
-        this._muteHandlers = null;
         this._queueTimeEntries = [];
         this._queueTimeRefreshId = null;
+        this._stored = [];
 
-        this.connect('destroy', () => this._clearTimeouts());
+        this.connect('destroy', () => {
+            this._clearTimeouts();
+            this._releaseStore();
+        });
         // Using notify::hover (backed by St's track-hover) rather than raw
         // enter-event/leave-event: those fire every time the pointer crosses
         // onto a reactive child (the seek bar, media buttons), which made the
@@ -475,10 +562,6 @@ class DynamicIsland extends St.BoxLayout {
         this.connect('button-release-event', (actor, event) => this._onRelease(event));
 
         this._refreshBadge();
-    }
-
-    setMuteHandlers(handlers) {
-        this._muteHandlers = handlers;
     }
 
     _animMs() {
@@ -536,14 +619,16 @@ class DynamicIsland extends St.BoxLayout {
                 mode: Clutter.AnimationMode.EASE_OUT_BACK,
             });
         };
-        // Stop the press/release here rather than propagating: these buttons
-        // already have their own 'clicked' handler, so letting the event
-        // bubble up made every button tap also feed the island's own
-        // press/hold/click-count gesture machinery (_onPress/_onRelease) —
-        // a quick play/pause tap that ran a touch past LONG_PRESS_MS would
-        // fire _onHold() and unpin/collapse the expanded media view out from
-        // under the user, and two quick taps on any control could register
-        // as an island-level double-click and toggle the notification queue.
+        // Don't stop these ourselves: St.Button's own default press/release
+        // handling already returns EVENT_STOP (that's what emits 'clicked'
+        // and halts bubbling), and Clutter's event signals stop dead at the
+        // first handler that returns TRUE — so a connect_after handler here
+        // never runs once the default handler fires, and an explicit STOP
+        // from a normal (before) handler would skip the default handler
+        // entirely, breaking 'clicked'. Returning PROPAGATE lets our
+        // animation run and the default handler still process the click;
+        // its own STOP already keeps the tap from bubbling into the
+        // island's press/hold/click-count gesture machinery.
         button.connect('button-press-event', () => {
             button.remove_all_transitions();
             button.ease({
@@ -552,11 +637,11 @@ class DynamicIsland extends St.BoxLayout {
                 duration: 100,
                 mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             });
-            return Clutter.EVENT_STOP;
+            return Clutter.EVENT_PROPAGATE;
         });
         button.connect('button-release-event', () => {
             restore();
-            return Clutter.EVENT_STOP;
+            return Clutter.EVENT_PROPAGATE;
         });
         button.connect('leave-event', restore);
     }
@@ -592,13 +677,10 @@ class DynamicIsland extends St.BoxLayout {
         this._clockLabel.set_text(now.format(`%a %b %d  ${timeFmt}`));
     }
 
+    // The badge counts what the panel holds, not what the tray holds — they
+    // diverge as soon as a notification is opened or the app withdraws it.
     _getNotificationCount() {
-        try {
-            return Main.messageTray.getSources()
-                .reduce((n, source) => n + source.notifications.length, 0);
-        } catch (e) {
-            return 0;
-        }
+        return this._stored.length;
     }
 
     _refreshBadge() {
@@ -608,7 +690,7 @@ class DynamicIsland extends St.BoxLayout {
         }
         const count = this._getNotificationCount();
         if (count > 0) {
-            this._badgeLabel.set_text(count > 9 ? '9+' : String(count));
+            this._badgeLabel.set_text(count > 99 ? '99+' : String(count));
             this._badgeLabel.show();
         } else {
             this._badgeLabel.hide();
@@ -867,6 +949,19 @@ class DynamicIsland extends St.BoxLayout {
     // the queue's double-click toggle. Started on button-press and
     // cancelled on release; if it fires, the matching button-release must
     // not also be treated as a click.
+    // True when a press/release originated on one of the island's own
+    // interactive controls (any St.Button, or the seek bar) rather than the
+    // bare pill body — those handle their own clicks.
+    _pressLandedOnControl(source) {
+        let a = source;
+        while (a && a !== this) {
+            if (a instanceof St.Button || a === this._progressBg)
+                return true;
+            a = a.get_parent();
+        }
+        return false;
+    }
+
     _onPress(event) {
         // Right-click is a completely separate gesture (the timer quick-menu)
         // and must never fall into the left-click hold/multi-click machinery.
@@ -876,6 +971,15 @@ class DynamicIsland extends St.BoxLayout {
         }
         if (this._timerMenu.visible)
             this._hideTimerMenu();
+
+        // A press that lands on an interactive control (media buttons, seek
+        // bar, close buttons) is that control's own click — don't also feed
+        // it into the island's press/hold/click-count gesture machinery, or
+        // a play/pause tap unpins the view and two quick control taps toggle
+        // the queue. This guards regardless of what St.Button's own handler
+        // returns, so the controls can safely PROPAGATE and still emit 'clicked'.
+        if (this._pressLandedOnControl(event.get_source()))
+            return Clutter.EVENT_PROPAGATE;
 
         this._longPressFired = false;
         if (this._pressTimeoutId)
@@ -893,6 +997,11 @@ class DynamicIsland extends St.BoxLayout {
         if (event.get_button() === 3)
             return Clutter.EVENT_STOP; // already acted on in _onPress; swallow the release too
 
+        // Mirror the _onPress guard: a release on a control must not be
+        // counted as an island click (which would toggle the queue).
+        if (this._pressLandedOnControl(event.get_source()))
+            return Clutter.EVENT_PROPAGATE;
+
         if (this._pressTimeoutId) {
             GLib.source_remove(this._pressTimeoutId);
             this._pressTimeoutId = null;
@@ -905,19 +1014,13 @@ class DynamicIsland extends St.BoxLayout {
     }
 
     _onHold() {
-        if (this._notificationShowing) {
+        if (this._notificationShowing)
             this._activateNotification();
-            return;
-        }
-        if (this._mediaMode && !this._queueShowing) {
-            this._isPinned = !this._isPinned;
-            this._renderActive();
-        }
     }
 
     // Clicks are counted over a debounce window so a double click doesn't
-    // fire early on the first tap. While a notification is showing, 2+
-    // clicks opens/activates it. Otherwise, 2+ clicks opens/closes the
+    // fire early on the first tap. While a notification is showing, any
+    // click opens/activates it. Otherwise, 2+ clicks opens/closes the
     // notification queue — always, regardless of the media pinned state,
     // so the queue stays reachable while music is held open. Pinning the
     // media view is a separate gesture (press-and-hold, see _onHold) so it
@@ -933,9 +1036,9 @@ class DynamicIsland extends St.BoxLayout {
             this._clickCount = 0;
 
             if (this._notificationShowing) {
-                if (count >= 2) {
-                    this._activateNotification();
-                }
+                // Single click opens the app, like a native banner — the X
+                // next to it is there for dismiss-without-opening.
+                this._activateNotification();
             } else if (this._transientShowing) {
                 // No app to open for a battery/Bluetooth blip — any tap just dismisses it.
                 this._clearCollapseTimeout();
@@ -1031,6 +1134,19 @@ class DynamicIsland extends St.BoxLayout {
         }
     }
 
+    // Refreshes the right-pane date header and re-centres the calendar on
+    // today each time the panel opens (it may have been left on another month).
+    _updateCalendarHeader() {
+        const dt = GLib.DateTime.new_now_local();
+        this._calWeekday.set_text(dt.format('%A'));
+        this._calDate.set_text(`${dt.format('%B')} ${dt.get_day_of_month()} ${dt.get_year()}`);
+        if (this._calendar) {
+            try {
+                this._calendar.setDate(new Date());
+            } catch (e) { /* keep whatever it's showing */ }
+        }
+    }
+
     _showQueue() {
         this.remove_style_class_name('dynamic-island-compact');
         this.set_scale(1, 1);
@@ -1041,18 +1157,18 @@ class DynamicIsland extends St.BoxLayout {
             this._collapseTimeoutId = null;
         }
         this._queueBox.destroy_all_children();
-        this._queueGroups = [];
         this._queueTimeEntries = [];
-        this._queueStickyHeader.hide();
 
-        const sources = Main.messageTray.getSources().filter(s => s.notifications.length > 0);
+        // Newest first. GLib.DateTime objects don't coerce to numbers, so the
+        // comparison has to go through to_unix() (subtracting them was NaN,
+        // which left the list in raw arrival order).
+        this._stored
+            .slice()
+            .sort((a, b) => b.time.to_unix() - a.time.to_unix())
+            .forEach(record => this._addNotificationToQueue(record));
+        this._syncQueueEmpty();
 
-        if (sources.length === 0) {
-            let emptyLabel = new St.Label({ text: 'No new notifications', style_class: 'dynamic-island-body', x_align: Clutter.ActorAlign.CENTER });
-            this._queueBox.add_child(emptyLabel);
-        } else {
-            sources.forEach(source => this._addSourceGroupToQueue(source));
-        }
+        this._updateCalendarHeader();
 
         this._queueShowing = true;
         this._clockLabel.hide();
@@ -1087,35 +1203,8 @@ class DynamicIsland extends St.BoxLayout {
                 duration: this._animMs(),
                 mode: Clutter.AnimationMode.EASE_OUT_BACK,
             });
-            this._updateStickyHeader();
             return GLib.SOURCE_REMOVE;
         });
-    }
-
-    // Shows the currently-scrolled-past group's header pinned above the
-    // scroll view, so a long queue still reads as sectioned by app.
-    _updateStickyHeader() {
-        if (!this._queueShowing || this._queueGroups.length < 2) {
-            this._queueStickyHeader.hide();
-            return;
-        }
-
-        const offset = this._queueScroll.vadjustment.value;
-        let active = null;
-        for (const group of this._queueGroups) {
-            if (group.headerRow.get_position()[1] <= offset + 1)
-                active = group;
-            else
-                break;
-        }
-
-        if (active) {
-            this._queueStickyIcon.set_gicon(active.gicon);
-            this._queueStickyTitle.set_text(active.title);
-            this._queueStickyHeader.show();
-        } else {
-            this._queueStickyHeader.hide();
-        }
     }
 
     // Relative timestamps ("5m ago") are computed once at build time, so a
@@ -1141,151 +1230,103 @@ class DynamicIsland extends St.BoxLayout {
         this._queueShowing = false;
         this._stopQueueTimeRefresh();
         this._queueContainer.hide();
-        this._queueStickyHeader.hide();
 
         this._renderActive();
     }
 
-    _addSourceGroupToQueue(source) {
-        const isMuted = this._muteHandlers ? this._muteHandlers.isMuted(source.title) : false;
-        // Resolved once and reused below — it can fall back to an O(n) scan
-        // over running apps, not worth paying for twice per source.
-        const sourceIcon = resolveNotificationIcon(source, null);
-
-        const headerRow = new St.BoxLayout({
-            style_class: 'dynamic-island-queue-group-header',
-            vertical: false,
-            x_expand: true,
-        });
-        const appIcon = new St.Icon({
-            gicon: sourceIcon,
-            style_class: 'dynamic-island-queue-group-icon',
-            y_align: Clutter.ActorAlign.CENTER,
-        });
-        const appLabel = new St.Label({
-            text: `${source.title || 'Notifications'} (${source.notifications.length})`,
-            style_class: 'dynamic-island-queue-group-title',
-            x_expand: true,
-            y_align: Clutter.ActorAlign.CENTER,
-        });
-        // Without ellipsizing, a long app name pushes the mute button out of
-        // the row (or off the clipped island entirely) instead of truncating.
-        appLabel.clutter_text.set_ellipsize(3); // PANGO_ELLIPSIZE_END
-        const muteBtn = new St.Button({
-            style_class: isMuted ? 'dynamic-island-mute-btn dynamic-island-mute-btn-active' : 'dynamic-island-mute-btn',
-            y_align: Clutter.ActorAlign.CENTER,
-            child: new St.Icon({
-                icon_name: isMuted ? 'audio-volume-muted-symbolic' : 'audio-volume-high-symbolic',
-                icon_size: 14,
-            }),
-        });
-        muteBtn.connect('clicked', () => {
-            if (!this._muteHandlers)
-                return;
-            this._muteHandlers.toggleMute(source.title);
-            this._showQueue();
-        });
-        this._addPressFeedback(muteBtn);
-
-        headerRow.add_child(appIcon);
-        headerRow.add_child(appLabel);
-        headerRow.add_child(muteBtn);
-        this._queueBox.add_child(headerRow);
-
-        this._queueGroups.push({
-            headerRow,
-            gicon: sourceIcon,
-            title: source.title || 'Notifications',
-        });
-
-        source.notifications.forEach(notif => this._addNotificationToQueue(source, notif));
-    }
-
-    _addNotificationToQueue(source, notif) {
-        let urgent = false;
-        try { urgent = notif.urgency >= 2; } catch (e) { /* older API */ }
-
-        let itemBox = new St.BoxLayout({
-            style_class: urgent
+    _addNotificationToQueue(record) {
+        // A real St.Button, so a single click opens the app and hover/focus
+        // styling comes from the theme instead of hand-rolled event handling.
+        let itemBox = new St.Button({
+            style_class: record.urgent
                 ? 'dynamic-island-queue-item dynamic-island-urgent-item'
                 : 'dynamic-island-queue-item',
+            x_expand: true,
+            can_focus: true,
+        });
+        let row = new St.BoxLayout({
+            style_class: 'dynamic-island-queue-row',
             vertical: false,
-            reactive: true,
             x_expand: true,
         });
-        let clickCount = 0;
-        let clickTimeoutId = null;
-
-        itemBox.connect('button-release-event', () => {
-            clickCount++;
-            if (clickTimeoutId)
-                return Clutter.EVENT_STOP;
-
-            clickTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, MULTI_CLICK_MS, () => {
-                clickTimeoutId = null;
-                if (clickCount >= 2) {
-                    try {
-                        notif.activate();
-                    } catch (e) {
-                        logError(e, 'DynamicIsland: notification activate failed');
-                    }
-                    this._hideQueue();
-                }
-                clickCount = 0;
-                return GLib.SOURCE_REMOVE;
-            });
-            return Clutter.EVENT_STOP;
+        itemBox.set_child(row);
+        itemBox.connect('clicked', () => {
+            this._hideQueue();
+            this._openStored(record);
         });
 
         let icon = new St.Icon({
-            gicon: resolveNotificationIcon(source, notif),
+            gicon: record.gicon,
             style_class: 'dynamic-island-queue-icon',
             y_align: Clutter.ActorAlign.CENTER,
         });
 
         let textBox = new St.BoxLayout({
+            style_class: 'dynamic-island-queue-text',
             vertical: true,
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
             x_align: Clutter.ActorAlign.START,
         });
 
-        let titleText = notif.title || '';
-        let bodyText = (notif.body || '').replace(/\n/g, ' ');
+        let titleText = record.title;
+        let bodyText = record.body.replace(/\n/g, ' ');
         if (bodyText.length > MAX_BODY_CHARS) bodyText = bodyText.substring(0, MAX_BODY_CHARS - 1) + '…';
 
-        let timeLabel = new St.Label({
-            text: formatRelativeTime(notif._diReceivedTime),
-            style_class: 'dynamic-island-queue-time',
+        const received = record.time;
+
+        // Header line: which app it came from, and when — the two things a
+        // stored notification needs and the pill itself has no room for.
+        let metaRow = new St.BoxLayout({
+            style_class: 'dynamic-island-queue-meta',
+            vertical: false,
+            x_expand: true,
+        });
+        let appLabel = new St.Label({
+            text: record.appName,
+            style_class: 'dynamic-island-queue-app',
+            x_expand: true,
             x_align: Clutter.ActorAlign.START,
         });
+        appLabel.clutter_text.set_ellipsize(3); // PANGO_ELLIPSIZE_END
+        let timeLabel = new St.Label({
+            text: formatRelativeTime(received),
+            style_class: 'dynamic-island-queue-time',
+            x_align: Clutter.ActorAlign.END,
+        });
+        metaRow.add_child(appLabel);
+        metaRow.add_child(timeLabel);
+
         let titleLabel = new St.Label({ text: titleText, style_class: 'dynamic-island-queue-title', x_align: Clutter.ActorAlign.START });
         let bodyLabel = new St.Label({ text: bodyText, style_class: 'dynamic-island-queue-body' });
         // Same overflow problem as the group title: an unellipsized long
         // title pushes the close button out of the (clipped) queue row.
         titleLabel.clutter_text.set_ellipsize(3); // PANGO_ELLIPSIZE_END
+        bodyLabel.clutter_text.set_ellipsize(3);
 
-        textBox.add_child(timeLabel);
+        textBox.add_child(metaRow);
         textBox.add_child(titleLabel);
         if (bodyText.length > 0) textBox.add_child(bodyLabel);
 
-        this._queueTimeEntries.push({ label: timeLabel, receivedTime: notif._diReceivedTime });
+        this._queueTimeEntries.push({ label: timeLabel, receivedTime: received });
 
         let closeBtn = new St.Button({
             style_class: 'dynamic-island-queue-close',
             y_align: Clutter.ActorAlign.CENTER,
-            child: new St.Icon({ icon_name: 'window-close-symbolic', icon_size: 16 })
+            child: new St.Icon({ icon_name: 'window-close-symbolic', icon_size: 12 })
         });
+        // The X is the only thing that drops a card (along with Clear All) —
+        // the tray's own copy dying is not enough, see storeNotification().
         closeBtn.connect('clicked', () => {
-            notif.destroy();
+            this._removeStored(record);
             itemBox.destroy();
-            this._refreshBadge();
+            this._syncQueueEmpty();
         });
         this._addPressFeedback(closeBtn);
 
-        itemBox.add_child(icon);
-        itemBox.add_child(textBox);
-        itemBox.add_child(closeBtn);
+        row.add_child(icon);
+        row.add_child(textBox);
+        row.add_child(closeBtn);
 
         this._queueBox.add_child(itemBox);
 
@@ -1305,9 +1346,147 @@ class DynamicIsland extends St.BoxLayout {
         });
     }
 
+    // The placeholder and the scroll view are mutually exclusive; single
+    // source of truth for which one is up, since rows come and go while the
+    // panel is open (app clears its own notification, close button, etc).
+    _syncQueueEmpty() {
+        const empty = this._queueBox.get_n_children() === 0;
+        this._queueEmpty.visible = empty;
+        this._queueScroll.visible = !empty;
+    }
+
+    // The panel keeps a notification until the user clears it, but the message
+    // tray does not: it drops its copy the moment the notification is
+    // activated, the app withdraws it, or its source goes away. So the panel
+    // gets its own store of plain records, and each record's tray notification
+    // is just an optional extra ("still activatable") that can die under it.
+    storeNotification(source, notif) {
+        if (notif._diStored)
+            return;
+        notif._diStored = true;
+
+        const record = {
+            notif,
+            app: findAppForSource(source),
+            appName: (source && source.title) || '',
+            gicon: resolveNotificationIcon(source, notif),
+            title: notif.title || '',
+            body: notif.body || '',
+            urgent: false,
+            time: notificationTime(notif) || GLib.DateTime.new_now_local(),
+            destroyId: null,
+        };
+        try { record.urgent = notif.urgency >= 2; } catch (e) { /* older API */ }
+
+        record.destroyId = notif.connect('destroy', () => {
+            record.destroyId = null;
+            record.notif = null;
+        });
+
+        this._stored.unshift(record);
+        while (this._stored.length > MAX_STORED_NOTIFICATIONS)
+            this._forgetStored(this._stored.pop());
+
+        this._refreshBadge();
+        // Rebuild an open panel in place rather than popping a pill behind it.
+        if (this._queueShowing)
+            this._showQueue();
+    }
+
+    // Lets go of the tray notification a record was built from. Also destroys
+    // it, so a cleared card can't linger in GNOME's own message list.
+    _forgetStored(record) {
+        if (!record || !record.notif)
+            return;
+
+        if (record.destroyId) {
+            try { record.notif.disconnect(record.destroyId); } catch (e) { /* disposed */ }
+            record.destroyId = null;
+        }
+        try { record.notif.destroy(); } catch (e) { /* already gone */ }
+        record.notif = null;
+    }
+
+    // disable() teardown: let go of the tray's notifications without
+    // destroying them (the user's notifications aren't ours to clear), and
+    // unflag them so a later enable() can pick them up again.
+    _releaseStore() {
+        this._stored.forEach(record => {
+            if (!record.notif)
+                return;
+            if (record.destroyId) {
+                try { record.notif.disconnect(record.destroyId); } catch (e) { /* disposed */ }
+                record.destroyId = null;
+            }
+            try { delete record.notif._diStored; } catch (e) { /* disposed */ }
+        });
+        this._stored = [];
+    }
+
+    _removeStored(record) {
+        const idx = this._stored.indexOf(record);
+        if (idx >= 0)
+            this._stored.splice(idx, 1);
+        this._forgetStored(record);
+        this._refreshBadge();
+    }
+
+    // A card outlives its tray notification, so opening it has two paths:
+    // activate the live notification, or just raise the app it came from.
+    _openStored(record) {
+        if (record.notif) {
+            this._openNotification(record.notif);
+            return;
+        }
+
+        try {
+            const app = record.app || findAppForSource({ title: record.appName });
+            if (app) {
+                app.activate();
+                Main.overview.hide();
+            }
+        } catch (e) {
+            logError(e, 'DynamicIsland: app activate failed');
+        }
+    }
+
+    // Opening the app is activate()'s job — it routes to the notification's
+    // default action, else to the source's app. FDO senders have neither, so
+    // nothing would happen; fall back to raising the matching running app.
+    _openNotification(notif) {
+        if (!notif)
+            return;
+
+        let source = null;
+        try { source = notif.source; } catch (e) { /* ignore */ }
+        const needsFallback = !(source && source.app);
+
+        try {
+            notif.activate();
+        } catch (e) {
+            logError(e, 'DynamicIsland: notification activate failed');
+        }
+
+        if (!needsFallback)
+            return;
+
+        try {
+            const app = findAppForSource(source);
+            if (app) {
+                app.activate();
+                Main.overview.hide();
+            }
+        } catch (e) {
+            logError(e, 'DynamicIsland: app activate failed');
+        }
+    }
+
     _clearAllNotifications() {
-        const sources = Main.messageTray.getSources();
-        sources.forEach(source => {
+        this._stored.forEach(record => this._forgetStored(record));
+        this._stored = [];
+        // Anything the store never saw (muted apps, notifications that landed
+        // while the extension was off) goes too — "Clear All" means all.
+        Main.messageTray.getSources().forEach(source => {
             source.notifications.forEach(notif => notif.destroy());
         });
         this._hideQueue();
@@ -1368,9 +1547,9 @@ class DynamicIsland extends St.BoxLayout {
     showNotification(gicon, title, body, urgent, notification) {
         if (this._queueShowing) return;
 
-        if (this._collapseTimeoutId) {
-            GLib.source_remove(this._collapseTimeoutId);
-        }
+        // Must null the id too, or the next _clearCollapseTimeout() removes
+        // the same source again ("Source ID ... was not found").
+        this._clearCollapseTimeout();
         this._stopPositionPolling();
         this._progressRow.hide();
 
@@ -1535,11 +1714,7 @@ class DynamicIsland extends St.BoxLayout {
         if (!notification)
             return;
 
-        try {
-            notification.activate();
-        } catch (e) {
-            logError(e, 'DynamicIsland: notification activate failed');
-        }
+        this._openNotification(notification);
 
         this._clearCollapseTimeout();
         this._closeNotificationPopup();
@@ -1700,8 +1875,24 @@ class DynamicIsland extends St.BoxLayout {
 
         const fraction = Math.min(Math.max(positionMicros / info.length, 0), 1);
         const trackHeight = this._progressBg.height || 4;
+        const fillWidth = Math.round(trackWidth * fraction);
         this._progressFill.set_position(0, 0);
-        this._progressFill.set_size(Math.round(trackWidth * fraction), trackHeight);
+        this._progressFill.set_size(fillWidth, trackHeight);
+
+        const thumbSize = this._progressThumb.width || SEEK_THUMB_SIZE;
+        this._progressThumb.set_position(
+            Math.min(Math.max(fillWidth - thumbSize / 2, 0), trackWidth - thumbSize),
+            (trackHeight - thumbSize) / 2);
+    }
+
+    _updateSeekThumbVisibility() {
+        const visible = this._progressBg.hover || this._seeking;
+        this._progressThumb.remove_all_transitions();
+        this._progressThumb.ease({
+            opacity: visible ? 255 : 0,
+            duration: 150,
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+        });
     }
 
     _startPositionPolling() {
@@ -1743,6 +1934,7 @@ class DynamicIsland extends St.BoxLayout {
             return Clutter.EVENT_PROPAGATE;
 
         this._seeking = true;
+        this._updateSeekThumbVisibility();
         this._onSeekMove(actor, event);
 
         this._seekMotionId = global.stage.connect('motion-event', (a, e) => this._onSeekMove(actor, e));
@@ -1768,6 +1960,7 @@ class DynamicIsland extends St.BoxLayout {
         if (!this._seeking)
             return;
         this._seeking = false;
+        this._updateSeekThumbVisibility();
 
         if (this._seekMotionId) {
             global.stage.disconnect(this._seekMotionId);
@@ -1835,6 +2028,24 @@ class DynamicIsland extends St.BoxLayout {
             // gets its badge shown against a width that was sized for the
             // clock alone, clipping the badge against the pill's edge.
             this._refreshBadge();
+            // _topBox holds every element (clock, badge, media art/title,
+            // buttons), and get_preferred_width sums the *visible* ones. The
+            // idle-content swap otherwise only happens in onComplete, after the
+            // width is measured — so a hidden clock sizes the pill to the badge
+            // alone (clock then ellipsizes), and stale media art/title left over
+            // from a just-closed player size it too wide. Swap to idle content
+            // before measuring.
+            if (this._isIdle()) {
+                this._icon.hide();
+                this._textBox.hide();
+                this._mediaButton.hide();
+                this._prevButton.hide();
+                this._nextButton.hide();
+                this._notifCloseButton.hide();
+                this._progressRow.hide();
+                this._timerBadge.hide();
+                this._clockLabel.show();
+            }
         }
         let targetWidth;
         if (isCollapsedMedia)
@@ -1890,19 +2101,6 @@ export default class DynamicIslandExtension extends Extension {
             'monitors-changed', () => this._reposition());
         this._topOffsetChangedId = this._settings.connect(
             'changed::top-offset', () => this._reposition());
-
-        this._island.setMuteHandlers({
-            isMuted: appName => this._settings.get_strv('muted-apps').includes(appName),
-            toggleMute: appName => {
-                const muted = this._settings.get_strv('muted-apps');
-                const idx = muted.indexOf(appName);
-                if (idx >= 0)
-                    muted.splice(idx, 1);
-                else
-                    muted.push(appName);
-                this._settings.set_strv('muted-apps', muted);
-            },
-        });
 
         // --- Notifications ---
         this._notifSettings = new Gio.Settings({ schema_id: 'org.gnome.desktop.notifications' });
@@ -1981,17 +2179,27 @@ export default class DynamicIslandExtension extends Extension {
         });
 
         this._sourceHandlers.set(source, [notifId, destroyId]);
+
+        // Sources hooked at enable() may already hold notifications — capture
+        // them too, or everything from before the extension loaded is lost.
+        source.notifications.forEach(notif =>
+            this._island.storeNotification(source, notif));
     }
 
     _onNotification(source, notification) {
         notification._diReceivedTime = GLib.DateTime.new_now_local();
-        this._island._refreshBadge();
+        this._island.storeNotification(source, notification);
         // If nothing else is about to re-render the pill (disabled/muted —
         // no popup follows below), the idle clock pill's width was sized
         // before this badge existed. Resize now, or the badge clips against
         // the pill's edge instead of getting room next to the clock.
         if (this._island._isIdle())
             this._island._collapse();
+
+        // storeNotification() already folded it into an open panel; no pill
+        // gets popped behind one.
+        if (this._island._queueShowing)
+            return;
 
         if (!this._settings.get_boolean('notifications-enabled'))
             return;
