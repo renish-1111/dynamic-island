@@ -1836,8 +1836,10 @@ class DynamicIsland extends St.BoxLayout {
     }
 
     showLevel(gicon, label, level, maxLevel) {
-        const fraction = Math.min(Math.max(level / (maxLevel || 1), 0), 1);
-        const pct = `${Math.round(fraction * 100)}%`;
+        // level is relative to 1.0 (100%); maxLevel only sets the bar's span
+        // (1.5 when over-amplification is allowed), and is -1/absent otherwise.
+        const fraction = Math.min(Math.max(level / (maxLevel > 0 ? maxLevel : 1), 0), 1);
+        const pct = `${Math.round(level * 100)}%`;
         this.showTransient(null, label || pct, label ? pct : '', TRANSIENT_DISPLAY_MS, false,
             { gicon, level: fraction });
     }
@@ -2288,16 +2290,33 @@ export default class DynamicIslandExtension extends Extension {
 
         // --- Volume/brightness OSD → island level pill ---
         // Only OSDs with a level and a Gio.Icon are taken over; anything else
-        // (or a busy island) falls through to the Shell's own OSD.
+        // (or a busy island) falls through to the Shell's own OSD. The Shell's
+        // entry points differ by version: showAll(icon, label, level, max)
+        // (volume), show(icon, label, {monitor: {level, maxLevel}}) (GNOME 50
+        // brightness) and the older show(monitor, icon, label, level, max).
         const osd = Main.osdWindowManager;
-        this._origOsdShow = osd.show;
-        osd.show = (monitorIndex, icon, label, level, maxLevel) => {
-            if (this._settings.get_boolean('osd-pill-enabled') && level != null &&
-                icon && typeof icon !== 'string' && this._island.canShowLevel())
-                this._island.showLevel(icon, label, level, maxLevel);
-            else
-                this._origOsdShow.call(osd, monitorIndex, icon, label, level, maxLevel);
+        this._osdOrig = [];
+        const patchOsd = (name, toArgs) => {
+            const orig = osd[name];
+            if (typeof orig !== 'function')
+                return;
+            this._osdOrig.push([name, orig]);
+            osd[name] = (...args) => {
+                const [icon, label, level, maxLevel] = toArgs(args);
+                if (this._settings.get_boolean('osd-pill-enabled') && level != null &&
+                    icon && typeof icon !== 'string' && this._island.canShowLevel())
+                    this._island.showLevel(icon, label, level, maxLevel);
+                else
+                    orig.apply(osd, args);
+            };
         };
+        patchOsd('showAll', args => args);
+        patchOsd('show', args => {
+            if (typeof args[0] === 'number')
+                return args.slice(1);
+            const first = Object.values(args[2] ?? {})[0] ?? {};
+            return [args[0], args[1], first.level, first.maxLevel];
+        });
 
         // --- Battery (UPower) ---
         this._batteryWatcher = new BatteryWatcher();
@@ -2429,9 +2448,10 @@ export default class DynamicIslandExtension extends Extension {
             this._sourceHandlers = null;
         }
 
-        if (this._origOsdShow) {
-            Main.osdWindowManager.show = this._origOsdShow;
-            this._origOsdShow = null;
+        if (this._osdOrig) {
+            for (const [name, orig] of this._osdOrig)
+                Main.osdWindowManager[name] = orig;
+            this._osdOrig = null;
         }
 
         if (this._mediaWatcher) {
