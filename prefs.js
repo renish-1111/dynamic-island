@@ -4,6 +4,7 @@ import Adw from 'gi://Adw';
 import Gtk from 'gi://Gtk';
 import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 
 import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
@@ -74,23 +75,62 @@ export default class DynamicIslandPreferences extends ExtensionPreferences {
             'Unread badge',
             'Show a small count next to the clock when notifications are queued'));
 
-        const mutedGroup = new Adw.PreferencesGroup({
-            title: 'Muted Applications',
-            description: 'Apps muted from the island (toggle per app in the notification queue)',
-        });
-        page.add(mutedGroup);
-
-        const mutedRow = new Adw.ActionRow({ title: 'Clear all muted apps' });
-        const clearButton = new Gtk.Button({
-            label: 'Clear',
-            valign: Gtk.Align.CENTER,
-            css_classes: ['destructive-action'],
-        });
-        clearButton.connect('clicked', () => settings.set_strv('muted-apps', []));
-        mutedRow.add_suffix(clearButton);
-        mutedGroup.add(mutedRow);
+        page.add(this._buildMutedGroup(settings));
 
         return page;
+    }
+
+    // Muted apps still land in the queue; they just never pop the pill. The
+    // extension matches on the notification source's title, which for
+    // desktop apps is the app's display name — hence picking from app names.
+    _buildMutedGroup(settings) {
+        const group = new Adw.PreferencesGroup({
+            title: 'Muted Applications',
+            description: 'These apps are queued silently, without popping the island',
+        });
+
+        const apps = [...new Set(Gio.AppInfo.get_all()
+            .filter(a => a.should_show())
+            .map(a => a.get_display_name()))]
+            .sort((a, b) => a.localeCompare(b));
+
+        const picker = new Adw.ComboRow({
+            title: 'Mute an app',
+            model: new Gtk.StringList({ strings: apps }),
+        });
+        const addButton = new Gtk.Button({ label: 'Mute', valign: Gtk.Align.CENTER });
+        addButton.connect('clicked', () => {
+            const name = apps[picker.selected];
+            const muted = settings.get_strv('muted-apps');
+            if (name && !muted.includes(name))
+                settings.set_strv('muted-apps', [...muted, name]);
+        });
+        picker.add_suffix(addButton);
+        group.add(picker);
+
+        let rows = [];
+        const rebuild = () => {
+            rows.forEach(r => group.remove(r));
+            rows = settings.get_strv('muted-apps').map(name => {
+                const row = new Adw.ActionRow({ title: GLib.markup_escape_text(name, -1) });
+                const unmute = new Gtk.Button({
+                    icon_name: 'user-trash-symbolic',
+                    valign: Gtk.Align.CENTER,
+                    css_classes: ['flat'],
+                    tooltip_text: 'Unmute',
+                });
+                unmute.connect('clicked', () => settings.set_strv('muted-apps',
+                    settings.get_strv('muted-apps').filter(n => n !== name)));
+                row.add_suffix(unmute);
+                group.add(row);
+                return row;
+            });
+        };
+        const changedId = settings.connect('changed::muted-apps', rebuild);
+        group.connect('destroy', () => settings.disconnect(changedId));
+        rebuild();
+
+        return group;
     }
 
     _buildMediaPage(settings) {
@@ -143,6 +183,10 @@ export default class DynamicIslandPreferences extends ExtensionPreferences {
         group.add(this._switchRow(settings, 'bluetooth-alerts-enabled',
             'Bluetooth alerts',
             'Show a pill when a Bluetooth device connects or disconnects'));
+
+        group.add(this._switchRow(settings, 'osd-pill-enabled',
+            'Volume & brightness pill',
+            'Show volume/brightness changes as an island pill with a level bar instead of the Shell OSD'));
 
         return page;
     }

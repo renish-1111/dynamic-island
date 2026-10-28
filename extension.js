@@ -48,6 +48,9 @@ const MULTI_CLICK_MS = 300;
 const LONG_PRESS_MS = 500;
 const TRANSIENT_DISPLAY_MS = 2500;
 const TIMER_PRESETS_MIN = [1, 5, 10, 15, 30];
+const SWIPE_START_PX = 8;
+const SWIPE_DISMISS_PX = 90;
+const DND_PRESETS = [['DND · 30 min', 30 * 60], ['DND · 1 hour', 60 * 60], ['DND · until 8 AM', null]];
 
 function formatTime(micros) {
     const totalSeconds = Math.max(0, Math.floor(micros / 1000000));
@@ -509,6 +512,22 @@ class DynamicIsland extends St.BoxLayout {
         this._timerCancelButton.connect('clicked', () => this._cancelTimer());
         this._addPressFeedback(this._timerCancelButton);
         this._timerMenu.add_child(this._timerCancelButton);
+
+        this._timerMenu.add_child(new St.Widget({ style_class: 'dynamic-island-menu-sep' }));
+        DND_PRESETS.forEach(([label, seconds]) => {
+            const btn = new St.Button({ label, style_class: 'dynamic-island-timer-preset' });
+            btn.connect('clicked', () => this._setDnd(seconds));
+            this._addPressFeedback(btn);
+            this._timerMenu.add_child(btn);
+        });
+        this._dndOffButton = new St.Button({
+            label: 'Turn Off DND',
+            style_class: 'dynamic-island-timer-cancel',
+            visible: false,
+        });
+        this._dndOffButton.connect('clicked', () => this._setDnd(0));
+        this._addPressFeedback(this._dndOffButton);
+        this._timerMenu.add_child(this._dndOffButton);
         this._timerMenuClickId = null;
 
         this._textBox.hide();
@@ -523,6 +542,7 @@ class DynamicIsland extends St.BoxLayout {
         this._lastNotificationIcon = null;
         this._transientShowing = false;
         this._transientDurationMs = 0;
+        this._transientLevel = null;
         this._timerActive = false;
         this._timerEndUs = 0;
         this._timerTotalSeconds = 0;
@@ -674,8 +694,35 @@ class DynamicIsland extends St.BoxLayout {
     _updateClock() {
         const now = GLib.DateTime.new_now_local();
         const timeFmt = this._resolveClockFormat() === '12h' ? '%I:%M %p' : '%H:%M';
-        this._clockLabel.set_text(now.format(`%a %b %d  ${timeFmt}`));
+        const dnd = this._dndActive();
+        this._clockLabel.set_text(`${dnd ? '☾  ' : ''}${now.format(`%a %b %d  ${timeFmt}`)}`);
         this._calWeekday?.set_text(now.format(`%A  ${timeFmt}`));
+        // The glyph changes the clock's width; an idle pill sized before the
+        // flip (DND set, or it just expired) has to re-measure.
+        if (this._lastDnd !== undefined && dnd !== this._lastDnd && this._isIdle())
+            this._collapse();
+        this._lastDnd = dnd;
+    }
+
+    _dndActive() {
+        return this._settings.get_int64('dnd-until') > GLib.get_real_time() / 1000000;
+    }
+
+    _setDnd(seconds) {
+        this._hideTimerMenu();
+        let until = 0;
+        if (seconds === null) {
+            const now = GLib.DateTime.new_now_local();
+            let eight = GLib.DateTime.new_local(
+                now.get_year(), now.get_month(), now.get_day_of_month(), 8, 0, 0);
+            if (eight.to_unix() <= now.to_unix())
+                eight = eight.add_days(1);
+            until = eight.to_unix();
+        } else if (seconds > 0) {
+            until = Math.floor(GLib.get_real_time() / 1000000) + seconds;
+        }
+        this._settings.set_int64('dnd-until', until);
+        this._updateClock();
     }
 
     // The badge counts what the panel holds, not what the tray holds — they
@@ -774,6 +821,7 @@ class DynamicIsland extends St.BoxLayout {
 
     _showTimerMenu() {
         this._timerCancelButton.visible = this._timerActive;
+        this._dndOffButton.visible = this._dndActive();
         const [, naturalWidth] = this._timerMenu.get_preferred_width(-1);
         const [, naturalHeight] = this._timerMenu.get_preferred_height(-1);
         this._timerMenu.set_size(naturalWidth, naturalHeight);
@@ -1318,12 +1366,14 @@ class DynamicIsland extends St.BoxLayout {
         });
         // The X is the only thing that drops a card (along with Clear All) —
         // the tray's own copy dying is not enough, see storeNotification().
-        closeBtn.connect('clicked', () => {
+        const dismiss = () => {
             this._removeStored(record);
             itemBox.destroy();
             this._syncQueueEmpty();
-        });
+        };
+        closeBtn.connect('clicked', dismiss);
         this._addPressFeedback(closeBtn);
+        this._makeSwipeable(itemBox, dismiss);
 
         row.add_child(icon);
         row.add_child(textBox);
@@ -1344,6 +1394,60 @@ class DynamicIsland extends St.BoxLayout {
             delay: Math.min(itemIndex * 40, 200),
             duration: 220,
             mode: Clutter.AnimationMode.EASE_OUT_BACK,
+        });
+    }
+
+    // Drag a card sideways past SWIPE_DISMISS_PX to drop it, like the X.
+    // Motion/release are tracked on the stage (as the seek bar does) so a fast
+    // flick that leaves the card keeps working; fake_release() cancels the
+    // St.Button press so a drag never also counts as a click-to-open.
+    _makeSwipeable(card, onDismiss) {
+        let startX = 0;
+        let dragging = false;
+        let motionId = null;
+        let releaseId = null;
+
+        const stopTracking = () => {
+            if (motionId) global.stage.disconnect(motionId);
+            if (releaseId) global.stage.disconnect(releaseId);
+            motionId = releaseId = null;
+        };
+        card.connect('destroy', stopTracking);
+
+        card.connect('button-press-event', (actor, event) => {
+            if (event.get_button() !== 1 || motionId)
+                return Clutter.EVENT_PROPAGATE;
+            startX = event.get_coords()[0];
+            dragging = false;
+
+            motionId = global.stage.connect('motion-event', (a, e) => {
+                const dx = e.get_coords()[0] - startX;
+                if (!dragging && Math.abs(dx) > SWIPE_START_PX) {
+                    dragging = true;
+                    card.fake_release();
+                }
+                if (!dragging)
+                    return Clutter.EVENT_PROPAGATE;
+                card.translation_x = dx;
+                card.opacity = Math.round(255 * Math.max(0.25, 1 - Math.abs(dx) / card.width));
+                return Clutter.EVENT_STOP;
+            });
+            releaseId = global.stage.connect('button-release-event', (a, e) => {
+                const dx = e.get_coords()[0] - startX;
+                stopTracking();
+                if (!dragging)
+                    return Clutter.EVENT_PROPAGATE;
+                const gone = Math.abs(dx) > SWIPE_DISMISS_PX;
+                card.ease({
+                    translation_x: gone ? Math.sign(dx) * card.width : 0,
+                    opacity: gone ? 0 : 255,
+                    duration: 150,
+                    mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                    onComplete: () => { if (gone) onDismiss(); },
+                });
+                return Clutter.EVENT_STOP;
+            });
+            return Clutter.EVENT_PROPAGATE;
         });
     }
 
@@ -1517,9 +1621,9 @@ class DynamicIsland extends St.BoxLayout {
         }
 
         const isMedia = this._mediaMode && !this._notificationShowing && !this._transientShowing;
-        const showSeek = isMedia &&
+        const showSeek = this._transientLevel !== null || (isMedia &&
             this._settings.get_boolean('show-seek-bar') &&
-            this._lastMediaInfo && this._lastMediaInfo.length > 0;
+            this._lastMediaInfo && this._lastMediaInfo.length > 0);
         const targetHeight = showSeek ? EXPANDED_HEIGHT_WITH_SEEK : EXPANDED_HEIGHT;
         let targetWidth;
         if (showSeek)
@@ -1574,6 +1678,7 @@ class DynamicIsland extends St.BoxLayout {
 
         // A real notification always outranks a battery/Bluetooth blip.
         this._transientShowing = false;
+        this._endTransientLevel();
 
         this._notificationShowing = true;
         this._lastNotificationIcon = gicon;
@@ -1662,12 +1767,28 @@ class DynamicIsland extends St.BoxLayout {
     // never be visible at the same time) and the same hover-pause /
     // auto-collapse timer plumbing via _restartCollapseTimeout().
 
-    showTransient(iconName, title, subtitle, durationMs, urgent = false) {
-        if (this._queueShowing || this._notificationShowing || this._transientShowing)
+    // opts: { gicon } for a Gio.Icon instead of a themed name, { level } (0..1)
+    // to show the progress bar as a level meter. A level pill that's already up
+    // is updated in place, so holding a volume key doesn't get dropped.
+    showTransient(iconName, title, subtitle, durationMs, urgent = false, opts = {}) {
+        const updatingLevel = this._transientShowing && this._transientLevel !== null &&
+            opts.level !== undefined;
+        if (!updatingLevel &&
+            (this._queueShowing || this._notificationShowing || this._transientShowing))
             return;
 
         this._stopPositionPolling();
         this._progressRow.hide();
+
+        this._transientLevel = opts.level ?? null;
+        const hasLevel = this._transientLevel !== null;
+        this._progressBg.reactive = !hasLevel;
+        this._elapsedLabel.visible = this._totalLabel.visible = !hasLevel;
+        if (hasLevel) {
+            this._progressFill.set_style(`background-color: ${this._effectiveAccentColor()};`);
+            this._progressRow.show();
+            this._drawFill(this._transientLevel);
+        }
 
         this._transientShowing = true;
         this._transientDurationMs = durationMs;
@@ -1682,7 +1803,10 @@ class DynamicIsland extends St.BoxLayout {
 
         this._setIconArtMode(false);
         this._icon.set_style('');
-        this._icon.set_icon_name(iconName);
+        if (opts.gicon)
+            this._icon.set_gicon(opts.gicon);
+        else
+            this._icon.set_icon_name(iconName);
         this._icon.show();
 
         this._mediaButton.hide();
@@ -1700,8 +1824,32 @@ class DynamicIsland extends St.BoxLayout {
             this._restartCollapseTimeout();
     }
 
+    // Hands the (shared) progress bar back to the media pill.
+    _endTransientLevel() {
+        if (this._transientLevel === null)
+            return;
+        this._transientLevel = null;
+        this._progressRow.hide();
+        this._progressBg.reactive = true;
+        this._elapsedLabel.show();
+        this._totalLabel.show();
+    }
+
+    showLevel(gicon, label, level, maxLevel) {
+        const fraction = Math.min(Math.max(level / (maxLevel || 1), 0), 1);
+        const pct = `${Math.round(fraction * 100)}%`;
+        this.showTransient(null, label || pct, label ? pct : '', TRANSIENT_DISPLAY_MS, false,
+            { gicon, level: fraction });
+    }
+
+    canShowLevel() {
+        return !this._queueShowing && !this._notificationShowing &&
+            (!this._transientShowing || this._transientLevel !== null);
+    }
+
     _closeTransientPill() {
         this._transientShowing = false;
+        this._endTransientLevel();
         this._disconnectStageClickOutside();
         this._notifCloseButton.hide();
         this.remove_style_class_name('dynamic-island-urgent');
@@ -1862,6 +2010,13 @@ class DynamicIsland extends St.BoxLayout {
     // --- Seek bar -----------------------------------------------------
 
     _updateProgressUI(positionMicros) {
+        // The bar doubles as the volume/brightness level meter; while that
+        // pill is up, allocation redraws must paint the level, not the track.
+        if (this._transientLevel !== null) {
+            this._drawFill(this._transientLevel);
+            return;
+        }
+
         const info = this._lastMediaInfo;
         if (!info || !info.length)
             return;
@@ -1870,11 +2025,14 @@ class DynamicIsland extends St.BoxLayout {
         this._elapsedLabel.set_text(formatTime(positionMicros));
         this._totalLabel.set_text(formatTime(info.length));
 
+        this._drawFill(Math.min(Math.max(positionMicros / info.length, 0), 1));
+    }
+
+    _drawFill(fraction) {
         const trackWidth = this._progressBg.width;
         if (trackWidth <= 0)
             return; // not allocated yet; notify::allocation will redraw once it is
 
-        const fraction = Math.min(Math.max(positionMicros / info.length, 0), 1);
         const trackHeight = this._progressBg.height || 4;
         const fillWidth = Math.round(trackWidth * fraction);
         this._progressFill.set_position(0, 0);
@@ -2128,6 +2286,19 @@ export default class DynamicIslandExtension extends Extension {
             this._island.setMedia(!!info, info);
         });
 
+        // --- Volume/brightness OSD → island level pill ---
+        // Only OSDs with a level and a Gio.Icon are taken over; anything else
+        // (or a busy island) falls through to the Shell's own OSD.
+        const osd = Main.osdWindowManager;
+        this._origOsdShow = osd.show;
+        osd.show = (monitorIndex, icon, label, level, maxLevel) => {
+            if (this._settings.get_boolean('osd-pill-enabled') && level != null &&
+                icon && typeof icon !== 'string' && this._island.canShowLevel())
+                this._island.showLevel(icon, label, level, maxLevel);
+            else
+                this._origOsdShow.call(osd, monitorIndex, icon, label, level, maxLevel);
+        };
+
         // --- Battery (UPower) ---
         this._batteryWatcher = new BatteryWatcher();
         this._batteryChangedId = this._batteryWatcher.connect('changed', () => {
@@ -2205,8 +2376,10 @@ export default class DynamicIslandExtension extends Extension {
         if (!this._settings.get_boolean('notifications-enabled'))
             return;
 
-        const muted = this._settings.get_strv('muted-apps').includes(source.title);
-        if (muted)
+        // Muted apps and Do Not Disturb both still queue (above) — they only
+        // skip the pill.
+        if (this._island._dndActive() ||
+            this._settings.get_strv('muted-apps').includes(source.title))
             return;
 
         const gicon = resolveNotificationIcon(source, notification);
@@ -2254,6 +2427,11 @@ export default class DynamicIslandExtension extends Extension {
             }
             this._sourceHandlers.clear();
             this._sourceHandlers = null;
+        }
+
+        if (this._origOsdShow) {
+            Main.osdWindowManager.show = this._origOsdShow;
+            this._origOsdShow = null;
         }
 
         if (this._mediaWatcher) {
